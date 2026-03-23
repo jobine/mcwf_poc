@@ -42,9 +42,11 @@ class TestAnsaBackendConnection:
         from cli_anything.ansa.utils.ansa_backend import AnsaProcess
         with AnsaProcess(timeout=120) as proc:
             result = proc.run_script(
-                'def main():\n    return {"status": "ok"}',
+                'def main():\n    print("hello, ansa.")\n    return {"status": "ok"}',
                 "main"
             )
+
+            print(f"\n  Script output: {result}")
             assert result["success"]
             assert result["result"]["status"] == "ok"
 
