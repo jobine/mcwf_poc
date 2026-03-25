@@ -462,7 +462,7 @@ class AnsaProcess:
             time.sleep(poll_s)
 
     def run_script(self, script_text, function_name=None, keep_database=True,
-                   quiet_period_ms=0, quiet_max_wait_ms=1200):
+                   quiet_period_ms=0, quiet_max_wait_ms=1200, **kwargs):
         """Execute a script on the ANSA process.
 
         Args:
@@ -473,6 +473,7 @@ class AnsaProcess:
                              Set 0 to disable (default).
             quiet_max_wait_ms: Max wait time for quiet window.
         """
+        script_text = inject_script(script_text, function_name or "main", **kwargs)
         result = self.connection.run_script(script_text, function_name, keep_database)
         if quiet_period_ms > 0:
             self._wait_for_quiet_stdout(
@@ -509,14 +510,14 @@ class AnsaProcess:
 
 # ── Script builder helpers ──────────────────────────────────────────
 
-def build_script(code, imports=None, function_name="main"):
+def build_script(code, imports=None, function_name="main", **kwargs):
     """Build a complete ANSA Python script with imports and entry point.
 
     Args:
         code: The script body (will be indented inside the function).
         imports: List of import statements (default: ansa basics).
         function_name: Entry function name.
-
+        **kwargs: Additional keyword arguments to pass to the script.
     Returns:
         Tuple of (script_text, function_name).
     """
@@ -538,19 +539,66 @@ def build_script(code, imports=None, function_name="main"):
 def {function_name}():
 {indented}
 """
+    script = inject_script(script, function_name, **kwargs)
+
     return script, function_name
+
+
+def inject_script(script: str, function_name: str = "main", **kwargs) -> str:
+    """Inject keyword arguments as variable declarations at the top of a function.
+
+    Each kwarg is inserted as a local variable assignment at the beginning of
+    the specified function body.  Only built-in types (str, int, float, bool,
+    None, list, tuple, dict, set, bytes) are supported.
+
+    Args:
+        script: The original script text.
+        function_name: Name of the target function to inject into.
+        **kwargs: Key-value pairs to declare as variables.
+    Returns:
+        The modified script text with injected variable declarations.
+    """
+    if not kwargs:
+        return script
+
+    lines = script.splitlines(keepends=True)
+    # Locate the "def <function_name>(...):" line
+    pattern = f"def {function_name}("
+    insert_idx = None
+    indent = ""
+    for i, line in enumerate(lines):
+        if pattern in line:
+            # Determine body indent from the next non-empty line
+            for j in range(i + 1, len(lines)):
+                stripped = lines[j].strip()
+                if stripped:
+                    indent = lines[j][: len(lines[j]) - len(lines[j].lstrip())]
+                    break
+            else:
+                indent = "    "
+            insert_idx = i + 1
+            break
+
+    if insert_idx is None:
+        raise ValueError(f"Function '{function_name}' not found in script")
+
+    decl_lines = []
+    for key, value in kwargs.items():
+        decl_lines.append(f"{indent}{key} = {value!r}\n")
+
+    lines[insert_idx:insert_idx] = decl_lines
+    return "".join(lines)
 
 
 if __name__ == "__main__":
     # Example usage
     with AnsaProcess() as ansa:
-        ansa.start_stdout_reader(callback=lambda line: print(f"[ANSA] {line}"))
-        script, entry = build_script("""
-print("Hello from ANSA!")
-print("Current working directory:", os.getcwd())
-return {"message": "Hello, ANSA!"}
-""")
-        result = ansa.run_script(script, function_name=entry)
-        print("Script execution result:", result)
-        result = ansa.run_script(script, function_name=entry)
-        print("Script execution result:", result)
+        script = """\
+def main():
+    print('hello, world!')
+"""
+        print("Original script:")
+        print(script)
+        script = inject_script(script, function_name="main", a='hello', b=True, c=[1, 2, 3], d = {'key': 'value'})
+        print("Generated script:")
+        print(script)

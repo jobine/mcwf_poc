@@ -299,6 +299,7 @@ def run(
     project=None,
     quiet_period_ms: int = 200,
     quiet_max_wait_ms: int = 1200,
+    **kwargs
 ):
     """Open a model and run a script on it.
 
@@ -329,6 +330,7 @@ def run(
         "main",
         quiet_period_ms=quiet_period_ms,
         quiet_max_wait_ms=quiet_max_wait_ms,
+        **kwargs
     )
     if not _is_backend_result_ok(run_result):
         return {"status": "error", "message": _backend_result_error("Script execution failed", run_result)}
@@ -344,18 +346,9 @@ if __name__ == "__main__":
         result = run(
             backend=ansa,
             model_path=r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct-s.ansa", 
-            script=r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py"
+            script=r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py",
+            extra_arg1='value1',
+            extra_arg2=42,
         )
 
         print("Run result:", result)
-
-
-        # ansa.start_stdout_reader(callback=lambda line: print(f"[ANSA] {line}"))
-        # result = open_model(ansa, r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct-s.ansa")
-        # print("Open model result:", result)
-
-        # with open(r'D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py', 'r', encoding='utf-8') as script_file:
-        #     script = script_file.read()
-        #     print(f"Running part classifier script... \n{script}")
-        # result = ansa.run_script(script, "main")
-        # print("Run script result:", result)
