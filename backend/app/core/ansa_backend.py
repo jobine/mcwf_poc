@@ -325,7 +325,7 @@ class AnsaConnection:
                                 _MessageCode.goodbye, self._next_txn(),
                                 16 + len(packed))
         self._sock.sendall(header.pack() + packed)
-        resp = self._recv()
+        self._recv()
         return True
 
     def close(self):
@@ -355,6 +355,10 @@ class AnsaProcess:
                                          stderr=subprocess.PIPE)
         self._connection = None
         self._stdout_thread = None
+        self._stdout_stop = threading.Event()
+        self._last_stdout_line_time = 0.0
+        self._stdout_line_count = 0
+        self._stdout_time_lock = threading.Lock()
 
     def connect(self):
         """Establish IAP connection and perform handshake."""
@@ -370,32 +374,112 @@ class AnsaProcess:
         return self._connection
 
     def start_stdout_reader(self, callback=None):
-        """Start a daemon thread that reads ANSA stdout line-by-line in real time.
+        """Start a thread that reads ANSA stdout line-by-line in real time.
 
         Args:
             callback: Called with each line (str). Defaults to print.
                       The line has trailing newline characters stripped.
         """
-        if self._stdout_thread is not None:
+        if self._stdout_thread is not None and self._stdout_thread.is_alive():
             return
         if callback is None:
             callback = print
 
+        self._stdout_stop.clear()
+
         def _reader():
             try:
-                for raw in iter(self._process.stdout.readline, b''):
+                while not self._stdout_stop.is_set():
+                    raw = self._process.stdout.readline()
+                    if not raw:
+                        break
                     line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
-                    callback(line)
-            except ValueError:
-                pass  # stdout closed
+                    with self._stdout_time_lock:
+                        self._last_stdout_line_time = time.monotonic()
+                        self._stdout_line_count += 1
+                    try:
+                        callback(line)
+                    except Exception:
+                        # Never let callback errors kill the reader thread.
+                        pass
+            except (AttributeError, OSError, ValueError):
+                pass
 
-        t = threading.Thread(target=_reader, daemon=True)
+        t = threading.Thread(target=_reader, daemon=False)
         t.start()
         self._stdout_thread = t
 
-    def run_script(self, script_text, function_name=None, keep_database=True):
-        """Execute a script on the ANSA process."""
-        return self.connection.run_script(script_text, function_name, keep_database)
+    def stop_stdout_reader(self, timeout=2.0):
+        """Stop the stdout reader thread and wait for it to exit."""
+        self._stdout_stop.set()
+
+        if self._process and self._process.stdout:
+            try:
+                self._process.stdout.close()
+            except Exception:
+                pass
+
+        if self._stdout_thread and self._stdout_thread.is_alive():
+            self._stdout_thread.join(timeout=timeout)
+
+        self._stdout_thread = None
+
+    def _wait_for_quiet_stdout(self, quiet_period_ms=200, max_wait_ms=1200, poll_ms=20):
+        """Wait until stdout has been quiet for a window, or timeout.
+
+        This is best-effort and only applies when the stdout reader is active.
+        """
+        if quiet_period_ms <= 0:
+            return
+        if self._stdout_thread is None or not self._stdout_thread.is_alive():
+            return
+
+        start = time.monotonic()
+        quiet_s = quiet_period_ms / 1000.0
+        max_wait_s = max_wait_ms / 1000.0
+        poll_s = max(poll_ms, 1) / 1000.0
+        quiet_deadline = start + quiet_s
+        max_deadline = start + max_wait_s
+
+        with self._stdout_time_lock:
+            seen_count = self._stdout_line_count
+
+        while True:
+            now = time.monotonic()
+            if now >= quiet_deadline:
+                break
+
+            if now >= max_deadline:
+                break
+
+            with self._stdout_time_lock:
+                current_count = self._stdout_line_count
+
+            if current_count != seen_count:
+                seen_count = current_count
+                quiet_deadline = time.monotonic() + quiet_s
+
+            time.sleep(poll_s)
+
+    def run_script(self, script_text, function_name=None, keep_database=True,
+                   quiet_period_ms=0, quiet_max_wait_ms=1200):
+        """Execute a script on the ANSA process.
+
+        Args:
+            script_text: Python source code to execute.
+            function_name: Optional entry function to call.
+            keep_database: If True, keep database between executions.
+            quiet_period_ms: Optional stdout quiet window before returning.
+                             Set 0 to disable (default).
+            quiet_max_wait_ms: Max wait time for quiet window.
+        """
+        result = self.connection.run_script(script_text, function_name, keep_database)
+        if quiet_period_ms > 0:
+            self._wait_for_quiet_stdout(
+                quiet_period_ms=quiet_period_ms,
+                max_wait_ms=quiet_max_wait_ms,
+            )
+        return result
 
     def shutdown(self):
         """Gracefully shut down the ANSA process."""
@@ -412,6 +496,7 @@ class AnsaProcess:
                 self._process.wait(timeout=10)
             except Exception:
                 self._process.kill()
+            self.stop_stdout_reader()
             self._process = None
 
     def __enter__(self):

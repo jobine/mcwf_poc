@@ -2,6 +2,7 @@
 
 import json
 import os
+from pathlib import Path
 import time
 
 
@@ -53,6 +54,54 @@ DECKS = {
     "star": "STAR",
     "cgns": "CGNS",
 }
+
+
+def _is_backend_result_ok(result):
+    """Return True when ANSA IAP call succeeded and payload status is ok (if present)."""
+    if not isinstance(result, dict):
+        return False
+    if not result.get("success"):
+        return False
+
+    payload = result.get("result")
+    if isinstance(payload, dict) and "status" in payload:
+        return payload.get("status") == "ok"
+    return True
+
+
+def _backend_result_error(prefix, result):
+    """Build a consistent debug-friendly error string from backend response."""
+    if not isinstance(result, dict):
+        return f"{prefix}: invalid result type={type(result).__name__}"
+    return (
+        f"{prefix}: success={result.get('success')}, "
+        f"details={result.get('details')}, result={result.get('result')}"
+    )
+
+
+def _resolve_script_content(script):
+    """Resolve script input to executable source code.
+
+    Supports:
+    - pathlib.Path / os.PathLike: read file content
+    - str path to an existing file: read file content
+    - str script body: use as-is
+    """
+    if isinstance(script, os.PathLike):
+        with Path(script).open("r", encoding="utf-8") as f:
+            return f.read()
+
+    if isinstance(script, str):
+        try:
+            candidate = Path(script).expanduser()
+            if candidate.is_file():
+                with candidate.open("r", encoding="utf-8") as f:
+                    return f.read()
+        except (OSError, ValueError):
+            pass
+        return script
+
+    return str(script)
 
 
 def create_project(name, deck="nastran", output_path=None):
@@ -109,7 +158,7 @@ def save_project(project, path=None):
     return project
 
 
-def open_model(backend, model_path, project=None):
+def open_model(backend, model_path, project=None, quiet_period_ms: int = 0, quiet_max_wait_ms: int = 1200):
     """Open an ANSA model file via the backend.
 
     Args:
@@ -135,7 +184,13 @@ def main():
     }}
     return result
 '''
-    result = backend.run_script(script, "main", keep_database=False)
+    result = backend.run_script(
+        script,
+        "main",
+        keep_database=False,
+        quiet_period_ms=quiet_period_ms,
+        quiet_max_wait_ms=quiet_max_wait_ms,
+    )
 
     if project and result.get("result"):
         project["model_path"] = abs_path
@@ -237,20 +292,70 @@ def main():
 '''
     return backend.run_script(script, "main")
 
+def run(
+    backend: 'AnsaProcess',
+    model_path: Path,
+    script: os.PathLike | str,
+    project=None,
+    quiet_period_ms: int = 200,
+    quiet_max_wait_ms: int = 1200,
+):
+    """Open a model and run a script on it.
+
+    Args:
+        backend: AnsaProcess instance.
+        model_path: Model path to open.
+        script: Script path or script content.
+        project: Optional project state dict.
+        quiet_period_ms: Optional stdout quiet window before returning run result.
+        quiet_max_wait_ms: Max wait for quiet window.
+    """
+    if hasattr(backend, "start_stdout_reader"):
+        backend.start_stdout_reader(callback=lambda line: print(f'[ANSA] {line}'))
+
+    open_result = open_model(
+        backend,
+        model_path,
+        project,
+        quiet_period_ms=quiet_period_ms,
+        quiet_max_wait_ms=quiet_max_wait_ms,
+    )
+    if not _is_backend_result_ok(open_result):
+        return {"status": "error", "message": _backend_result_error("Failed to open model", open_result)}
+
+    script_content = _resolve_script_content(script)    
+    run_result = backend.run_script(
+        script_content,
+        "main",
+        quiet_period_ms=quiet_period_ms,
+        quiet_max_wait_ms=quiet_max_wait_ms,
+    )
+    if not _is_backend_result_ok(run_result):
+        return {"status": "error", "message": _backend_result_error("Script execution failed", run_result)}
+
+    return {"status": "ok", "open_result": open_result, "run_result": run_result}
+
 
 if __name__ == "__main__":
     # Example usage
-    import sys, os
-    sys.path.insert(0, os.path.abspath(os.path.join(os.path.dirname(__file__), '..', '..')))
-    from backend.app.core.ansa_backend import AnsaProcess
-    
-    with AnsaProcess() as ansa:
-        ansa.start_stdout_reader(callback=lambda line: print(f"[ANSA] {line}"))
-        result = open_model(ansa, r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct.ansa")
-        print("Open model result:", result)
+    from ansa_backend import AnsaProcess
 
-        with open(r'D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py', 'r', encoding='utf-8') as script_file:
-            script = script_file.read()
-            print(f"Running part classifier script... \n{script}")
-        result = ansa.run_script(script, "main")
-        print("Run script result:", result)
+    with AnsaProcess() as ansa:
+        result = run(
+            backend=ansa,
+            model_path=r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct-s.ansa", 
+            script=r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py"
+        )
+
+        print("Run result:", result)
+
+
+        # ansa.start_stdout_reader(callback=lambda line: print(f"[ANSA] {line}"))
+        # result = open_model(ansa, r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct-s.ansa")
+        # print("Open model result:", result)
+
+        # with open(r'D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py', 'r', encoding='utf-8') as script_file:
+        #     script = script_file.read()
+        #     print(f"Running part classifier script... \n{script}")
+        # result = ansa.run_script(script, "main")
+        # print("Run script result:", result)
