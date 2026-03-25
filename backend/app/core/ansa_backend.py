@@ -6,16 +6,14 @@ sent for execution and results are returned.
 """
 
 import os
-import json
 import platform
 import shutil
 import socket
 import struct
 import subprocess
-import sys
+import threading
 import time
 import textwrap
-
 
 # ── IAP Protocol constants ──────────────────────────────────────────
 
@@ -356,6 +354,7 @@ class AnsaProcess:
                                          stdout=subprocess.PIPE,
                                          stderr=subprocess.PIPE)
         self._connection = None
+        self._stdout_thread = None
 
     def connect(self):
         """Establish IAP connection and perform handshake."""
@@ -369,6 +368,30 @@ class AnsaProcess:
         if self._connection is None:
             self.connect()
         return self._connection
+
+    def start_stdout_reader(self, callback=None):
+        """Start a daemon thread that reads ANSA stdout line-by-line in real time.
+
+        Args:
+            callback: Called with each line (str). Defaults to print.
+                      The line has trailing newline characters stripped.
+        """
+        if self._stdout_thread is not None:
+            return
+        if callback is None:
+            callback = print
+
+        def _reader():
+            try:
+                for raw in iter(self._process.stdout.readline, b''):
+                    line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
+                    callback(line)
+            except ValueError:
+                pass  # stdout closed
+
+        t = threading.Thread(target=_reader, daemon=True)
+        t.start()
+        self._stdout_thread = t
 
     def run_script(self, script_text, function_name=None, keep_database=True):
         """Execute a script on the ANSA process."""
@@ -431,3 +454,18 @@ def {function_name}():
 {indented}
 """
     return script, function_name
+
+
+if __name__ == "__main__":
+    # Example usage
+    with AnsaProcess() as ansa:
+        ansa.start_stdout_reader(callback=lambda line: print(f"[ANSA] {line}"))
+        script, entry = build_script("""
+print("Hello from ANSA!")
+print("Current working directory:", os.getcwd())
+return {"message": "Hello, ANSA!"}
+""")
+        result = ansa.run_script(script, function_name=entry)
+        print("Script execution result:", result)
+        result = ansa.run_script(script, function_name=entry)
+        print("Script execution result:", result)
