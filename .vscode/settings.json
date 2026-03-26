@@ -1,7 +1,4 @@
 {
-    "python.testing.pytestArgs": [
-        "tools/ansa/agent-harness/cli_anything/ansa/tests"
-    ],
     "python.testing.unittestEnabled": false,
     "python.testing.pytestEnabled": true
 }

@@ -1,12 +1,13 @@
-"""Tests for backend.app.core.ansa — AnsaProcess & AnsaConnection."""
+"""Tests for app.core.ansa_backend — AnsaConnection, AnsaProcess, inject_script, build_script."""
 
 import socket
 import subprocess
+import threading
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from backend.app.core.ansa_backend import (
+from app.core.ansa_backend import (
     _IE,
     _Tag,
     _MessageCode,
@@ -18,6 +19,8 @@ from backend.app.core.ansa_backend import (
     _pack_ies,
     AnsaConnection,
     AnsaProcess,
+    inject_script,
+    build_script,
 )
 
 
@@ -150,8 +153,8 @@ class TestAnsaConnection:
 
 class TestAnsaProcess:
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
     def test_init_default(self, _mock_port, _mock_find, mock_popen):
         proc = AnsaProcess()
         assert proc.port == 9999
@@ -163,7 +166,7 @@ class TestAnsaProcess:
         assert '-b' in cmd
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa._free_port', return_value=8888)
+    @patch('app.core.ansa_backend._free_port', return_value=8888)
     def test_init_custom_command(self, _mock_port, mock_popen):
         proc = AnsaProcess(ansa_command='/opt/ansa', batch=False, port=7777)
         assert proc.port == 7777
@@ -172,8 +175,8 @@ class TestAnsaProcess:
         assert '-b' not in cmd
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
     def test_extra_args(self, _mock_port, _mock_find, mock_popen):
         proc = AnsaProcess(extra_args=['-nologo', '-silent'])
         cmd = mock_popen.call_args[0][0]
@@ -181,9 +184,9 @@ class TestAnsaProcess:
         assert '-silent' in cmd
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
-    @patch('app.core.ansa.AnsaConnection')
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.AnsaConnection')
     def test_connect(self, mock_conn_cls, _mock_port, _mock_find, _mock_popen):
         mock_conn = MagicMock()
         mock_conn_cls.return_value = mock_conn
@@ -195,9 +198,9 @@ class TestAnsaProcess:
         assert result is mock_conn
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
-    @patch('app.core.ansa.AnsaConnection')
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.AnsaConnection')
     def test_connection_property_lazy(self, mock_conn_cls, _mock_port, _mock_find, _mock_popen):
         mock_conn = MagicMock()
         mock_conn_cls.return_value = mock_conn
@@ -209,22 +212,41 @@ class TestAnsaProcess:
         assert proc._connection is mock_conn
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
-    @patch('app.core.ansa.AnsaConnection')
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.AnsaConnection')
     def test_run_script_delegates(self, mock_conn_cls, _mock_port, _mock_find, _mock_popen):
         mock_conn = MagicMock()
         mock_conn.run_script.return_value = {'success': True}
         mock_conn_cls.return_value = mock_conn
 
         proc = AnsaProcess()
-        result = proc.run_script("code", "func", keep_database=False)
-        mock_conn.run_script.assert_called_once_with("code", "func", False)
+        result = proc.run_script("def func():\n    pass\n", "func", keep_database=False)
+        # inject_script is called first, then delegates to connection.run_script
+        mock_conn.run_script.assert_called_once()
+        call_args = mock_conn.run_script.call_args
+        assert call_args[0][1] == "func"
+        assert call_args[0][2] is False
         assert result == {'success': True}
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.AnsaConnection')
+    def test_run_script_with_kwargs_injects(self, mock_conn_cls, _mock_port, _mock_find, _mock_popen):
+        """run_script with extra kwargs injects them via inject_script."""
+        mock_conn = MagicMock()
+        mock_conn.run_script.return_value = {'success': True}
+        mock_conn_cls.return_value = mock_conn
+
+        proc = AnsaProcess()
+        proc.run_script("def main():\n    pass\n", "main", my_var="hello")
+        sent_script = mock_conn.run_script.call_args[0][0]
+        assert "my_var = 'hello'" in sent_script
+
+    @patch('subprocess.Popen')
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
     def test_shutdown(self, _mock_port, _mock_find, mock_popen):
         mock_proc = MagicMock()
         mock_popen.return_value = mock_proc
@@ -241,8 +263,8 @@ class TestAnsaProcess:
         assert proc._process is None
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
     def test_shutdown_force_kill_on_timeout(self, _mock_port, _mock_find, mock_popen):
         mock_proc = MagicMock()
         mock_proc.wait.side_effect = subprocess.TimeoutExpired(cmd='ansa', timeout=10)
@@ -253,9 +275,9 @@ class TestAnsaProcess:
         mock_proc.kill.assert_called_once()
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
-    @patch('app.core.ansa.AnsaConnection')
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.AnsaConnection')
     def test_context_manager(self, mock_conn_cls, _mock_port, _mock_find, mock_popen):
         mock_conn = MagicMock()
         mock_conn_cls.return_value = mock_conn
@@ -271,8 +293,8 @@ class TestAnsaProcess:
 
 class TestStartStdoutReader:
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
     def test_reads_lines_via_callback(self, _mock_port, _mock_find, mock_popen):
         mock_proc = MagicMock()
         # Simulate stdout producing two lines then EOF
@@ -289,11 +311,13 @@ class TestStartStdoutReader:
         assert collected == ['hello world', 'line two']
 
     @patch('subprocess.Popen')
-    @patch('app.core.ansa.find_ansa', return_value='/usr/bin/ansa')
-    @patch('app.core.ansa._free_port', return_value=9999)
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
     def test_only_starts_once(self, _mock_port, _mock_find, mock_popen):
         mock_proc = MagicMock()
-        mock_proc.stdout.readline.side_effect = [b'']
+        # Keep the thread alive by blocking on readline until stop event
+        barrier = threading.Event()
+        mock_proc.stdout.readline.side_effect = lambda: (barrier.wait() and b'') or b''
         mock_popen.return_value = mock_proc
 
         proc = AnsaProcess()
@@ -301,4 +325,71 @@ class TestStartStdoutReader:
         first_thread = proc._stdout_thread
         proc.start_stdout_reader(callback=lambda x: None)
         assert proc._stdout_thread is first_thread
+        # Clean up
+        barrier.set()
+        proc.stop_stdout_reader(timeout=2)
 
+
+# ── inject_script / build_script ────────────────────────────────────
+
+class TestInjectScript:
+    def test_no_kwargs_returns_unchanged(self):
+        script = "def main():\n    pass\n"
+        assert inject_script(script, "main") == script
+
+    def test_injects_string_variable(self):
+        script = "def main():\n    print('hi')\n"
+        result = inject_script(script, "main", name="alice")
+        assert "name = 'alice'" in result
+        assert "print('hi')" in result
+
+    def test_injects_multiple_kwargs(self):
+        script = "def main():\n    pass\n"
+        result = inject_script(script, "main", x=1, y=True, z=[1, 2])
+        assert "x = 1" in result
+        assert "y = True" in result
+        assert "z = [1, 2]" in result
+
+    def test_raises_on_missing_function(self):
+        script = "def other():\n    pass\n"
+        with pytest.raises(ValueError, match="Function 'main' not found"):
+            inject_script(script, "main", a=1)
+
+    def test_preserves_indentation(self):
+        script = "def main():\n    x = 10\n    return x\n"
+        result = inject_script(script, "main", val=42)
+        lines = result.splitlines()
+        for line in lines:
+            if "val = 42" in line:
+                assert line.startswith("    ")
+                break
+        else:
+            pytest.fail("Injected line not found")
+
+
+class TestBuildScript:
+    def test_basic_build(self):
+        code = "print('hello')"
+        script, func = build_script(code)
+        assert func == "main"
+        assert "def main():" in script
+        assert "print('hello')" in script
+        assert "import ansa" in script
+
+    def test_custom_function_name(self):
+        code = "return 1"
+        script, func = build_script(code, function_name="entry")
+        assert func == "entry"
+        assert "def entry():" in script
+
+    def test_custom_imports(self):
+        code = "pass"
+        script, func = build_script(code, imports=["import sys", "import os"])
+        assert "import sys" in script
+        assert "import os" in script
+        assert "import ansa" not in script
+
+    def test_build_with_kwargs(self):
+        code = "return x"
+        script, func = build_script(code, function_name="main", x=42)
+        assert "x = 42" in script
