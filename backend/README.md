@@ -193,6 +193,56 @@ ws.onmessage = (ev) => {
   └─ stdout.log     # ANSA 标准输出日志
 ```
 
+### 请求时序图
+
+下图展示了一次完整的实验请求流程——从浏览器发起 `POST /experiment` 到通过 WebSocket 实时接收 ANSA 输出并获取最终结果：
+
+```mermaid
+sequenceDiagram
+    participant B as Browser
+    participant F as FastAPI
+    participant T as ThreadPool
+    participant W as LangGraph Workflow
+    participant A as ANSA Process
+
+    B->>F: POST /experiment
+    F->>F: 生成 experiment_id<br/>创建 stdout_q<br/>注册 _experiments
+    F->>T: run_in_executor(_run_workflow)
+    F-->>B: 202 {"experiment_id": "..."}
+
+    B->>F: WS /experiment/{id}/stdout
+    F-->>B: WebSocket 连接建立
+
+    T->>W: workflow.invoke(state)
+    W->>W: init_experiment<br/>创建实验目录
+    W->>W: validate_inputs<br/>校验模型 & 脚本路径
+
+    W->>A: 启动 ANSA 进程<br/>加载模型 & 执行脚本
+
+    loop ANSA 实时输出
+        A-->>W: stdout line
+        W-->>T: on_stdout(line)
+        T-->>F: stdout_q.put(line)
+        F-->>B: {"event":"stdout","data":"<line>"}
+    end
+
+    loop 空闲保活 (每 15s)
+        F-->>B: {"event":"heartbeat","data":""}
+    end
+
+    A-->>W: 脚本执行完成
+    W->>W: save_results<br/>写入 result.json & stdout.log
+    W-->>T: 返回 final_state
+    T-->>F: 存储 final_state<br/>stdout_q.put(None)
+    F-->>B: {"event":"done","data":{…}}
+    B->>F: 关闭 WebSocket
+
+    opt 轮询结果
+        B->>F: GET /experiment/{id}
+        F-->>B: 200 {status, result, …}
+    end
+```
+
 ## 核心模块
 
 ### `app/api/` — API 层
