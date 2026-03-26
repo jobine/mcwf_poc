@@ -16,7 +16,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-import uuid
 from collections.abc import Callable
 
 from langgraph.graph import StateGraph, START, END
@@ -29,11 +28,11 @@ from app.graph.state import AnsaAgentState
 # ── Experiment lifecycle nodes ──────────────────────────────────────
 
 def init_experiment(state: AnsaAgentState) -> AnsaAgentState:
-    """Generate an experiment UUID and create its directory."""
-    exp_id = uuid.uuid4().hex
+    """Create the experiment directory for the given experiment_id."""
+    exp_id = state["experiment_id"]
     exp_dir = settings.experiments_dir / exp_id
     exp_dir.mkdir(parents=True, exist_ok=True)
-    return {"experiment_id": exp_id}
+    return {}
 
 
 def save_results(state: AnsaAgentState) -> AnsaAgentState:
@@ -72,7 +71,7 @@ def create_ansa_workflow(
         model_path: Path to the ANSA model file. Defaults to demo.ansa.
         script_path: Path to the script to execute. Defaults to part_classifier.py.
         on_stdout: Optional callback invoked for every ANSA stdout line.
-            Used by the API layer to push lines over SSE.
+            Used by the API layer to push lines over WebSocket.
 
     Graph::
 
@@ -107,10 +106,12 @@ def create_ansa_workflow(
 
 # ── Convenience runners ─────────────────────────────────────────────
 
-def run_workflow() -> AnsaAgentState:
+def run_workflow(experiment_id: str | None = None) -> AnsaAgentState:
     """One-shot helper: build the workflow, invoke it, and return final state."""
+    import uuid
     workflow = create_ansa_workflow(on_stdout=lambda line: print(f"[ANSA] {line}"))
     return workflow.invoke({
+        "experiment_id": experiment_id or uuid.uuid4().hex,
         "status": "pending",
         "result": None,
         "error": None,
