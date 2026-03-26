@@ -1,0 +1,9 @@
+{
+  "experiment_id": "7b814c3b051f479784de7bc7da33e5cf",
+  "status": "error",
+  "result": {
+    "status": "error",
+    "message": "Script execution failed: success=False, details=3, result=None"
+  },
+  "error": "Script execution failed: success=False, details=3, result=None"
+}

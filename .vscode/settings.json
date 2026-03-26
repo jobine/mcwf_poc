@@ -1,4 +1,15 @@
 {
     "python.testing.unittestEnabled": false,
-    "python.testing.pytestEnabled": true
+    "python.testing.pytestEnabled": true,
+    "python.defaultInterpreterPath": "D:\\ProgramData\\miniconda3\\envs\\mcwf\\python.exe",
+    "python.condaPath": "D:\\ProgramData\\miniconda3\\Scripts\\conda.exe",
+    "python.terminal.activateEnvironment": false,
+    "python.terminal.activateEnvInCurrentTerminal": false,
+    "terminal.integrated.profiles.windows": {
+        "Conda mcwf": {
+            "path": "cmd.exe",
+            "args": ["/K", "D:\\ProgramData\\miniconda3\\Scripts\\activate.bat D:\\ProgramData\\miniconda3\\envs\\mcwf"]
+        }
+    },
+    "terminal.integrated.defaultProfile.windows": "Conda mcwf"
 }
