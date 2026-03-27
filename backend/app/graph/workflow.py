@@ -19,6 +19,7 @@ import json
 from collections.abc import Callable
 
 from langgraph.graph import StateGraph, START, END
+from langgraph.pregel import RetryPolicy
 
 from app.agents.ansa_agent import AnsaAgent
 from app.config import settings
@@ -88,7 +89,7 @@ def create_ansa_workflow(
 
     graph.add_node("init_experiment", init_experiment)
     graph.add_node("validate_inputs", ansa.validate_inputs)
-    graph.add_node("run_ansa", ansa.run_ansa)
+    graph.add_node("run_ansa", ansa.run_ansa, retry=RetryPolicy(max_attempts=3))
     graph.add_node("save_results", save_results)
 
     graph.add_edge(START, "init_experiment")

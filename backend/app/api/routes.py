@@ -53,6 +53,15 @@ def _run_workflow(experiment_id: str, stdout_q: queue.Queue) -> None:
     stdout_q.put(None)  # sentinel
 
 
+# ── GET /workflow ──────────────────────────────────────────────────────
+
+@router.get("/workflow")
+async def get_workflow_graph():
+    """Return the compiled ANSA workflow graph as JSON."""
+    workflow = create_ansa_workflow()
+    return JSONResponse(workflow.get_graph().to_json())
+
+
 # ── POST /experiment ──────────────────────────────────────────────────
 
 @router.post("/experiment")

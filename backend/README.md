@@ -82,7 +82,7 @@ poetry run uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
 服务启动后：
 
 - Swagger UI：`http://localhost:8000/docs`
-- REST 端点：`POST /experiment`、`GET /experiment/{id}`
+- REST 端点：`GET /workflow`、`POST /experiment`、`GET /experiment/{id}`
 - WebSocket 端点：`ws://localhost:8000/experiment/{id}/stdout`
 
 ### 独立运行工作流
@@ -108,6 +108,12 @@ poetry run python -m app.graph.workflow
 ## API 接口
 
 采用 REST + WebSocket 两阶段架构：先通过 HTTP 启动工作流，再通过 WebSocket 实时接收输出。
+
+### `GET /workflow`
+
+获取编译后的 ANSA 工作流图的 JSON 表示（节点、边及其关系）。
+
+- **响应 200**：工作流图 JSON（包含 `nodes`、`edges` 等结构信息）
 
 ### `POST /experiment`
 
@@ -165,6 +171,7 @@ ws.onmessage = (ev) => {
 ┌──────────────────────────────────────────────┐
 │           FastAPI Server (:8000)              │
 │  POST /experiment          → 启动工作流       │
+│  GET  /workflow            → 获取工作流图 JSON  │
 │  GET  /experiment/{id}     → 轮询结果         │
 │  WS   /experiment/{id}/stdout → 实时输出流    │
 └──────────────────┬───────────────────────────┘
@@ -172,7 +179,7 @@ ws.onmessage = (ev) => {
 ┌──────────────────────────────────────────────┐
 │       LangGraph Workflow (graph/)            │
 │  START → init_experiment → validate_inputs   │
-│        → run_ansa → save_results → END       │
+│        → run_ansa (retry×3) → save_results → END │
 └──────────────────┬───────────────────────────┘
                    ↓
 ┌──────────────────────────────────────────────┐
@@ -254,13 +261,13 @@ FastAPI 应用初始化，提供 REST 端点（启动/轮询工作流）和 WebS
 `AnsaAgent` 封装了工作流中的 ANSA 操作节点：
 
 - **`validate_inputs`** — 验证模型文件和脚本路径
-- **`run_ansa`** — 打开模型并执行脚本
+- **`run_ansa`** — 打开模型并执行脚本（配置 `RetryPolicy`，最多重试 3 次）
 - **`should_run`** — 条件路由（验证通过则执行，否则跳至保存结果）
 
 ### `app/graph/` — 工作流
 
 - **`state.py`** — 定义工作流状态（`AnsaAgentState`）：实验 ID、模型路径、脚本路径、执行状态、结果等
-- **`workflow.py`** — 构建 LangGraph 工作流图，提供同步/异步执行入口
+- **`workflow.py`** — 构建 LangGraph 工作流图，`run_ansa` 节点配备重试策略，提供同步/异步执行入口及 JSON 图导出
 
 ### `app/core/` — 核心功能
 
