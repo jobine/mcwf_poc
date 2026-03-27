@@ -350,9 +350,13 @@ class AnsaProcess:
         if extra_args:
             cmd.extend(extra_args)
 
+        env = os.environ.copy()
+        env['PYTHONIOENCODING'] = 'utf-8'
+
         self._process = subprocess.Popen(cmd, shell=False,
                                          stdout=subprocess.PIPE,
-                                         stderr=subprocess.PIPE)
+                                         stderr=subprocess.PIPE,
+                                         env=env)
         self._connection = None
         self._stdout_thread = None
         self._stdout_stop = threading.Event()
