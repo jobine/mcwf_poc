@@ -213,3 +213,8 @@ __marimo__/
 # Test Data
 tools/ansa/agent-harness/cli_anything/ansa/tests/data/
 example/
+
+# Output Data
+backend/experiments/
+backend/data/shared/
+backend/scripts/

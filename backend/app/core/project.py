@@ -340,13 +340,15 @@ def run(
 
 if __name__ == "__main__":
     # Example usage
-    from ansa_backend import AnsaProcess
+    from app.core.ansa_backend import AnsaProcess
 
     with AnsaProcess() as ansa:
         result = run(
             backend=ansa,
-            model_path=r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct-s.ansa", 
-            script=r"D:\Workspace\mcwf_poc\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py",
+            # model_path=r"D:\Code\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct-s.ansa", 
+            # script=r"D:\Code\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py"
+            model_path=r'D:\Workspace\mcwf_poc\backend\data\shared\demo.ansa',
+            script=r'D:\Workspace\mcwf_poc\backend\scripts\part_classifier.py',
             extra_arg1='value1',
             extra_arg2=42,
         )
