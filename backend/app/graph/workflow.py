@@ -19,7 +19,7 @@ import json
 from collections.abc import Callable
 
 from langgraph.graph import StateGraph, START, END
-from langgraph.pregel import RetryPolicy
+from langgraph.types import RetryPolicy
 
 from app.agents.ansa_agent import AnsaAgent
 from app.config import settings
