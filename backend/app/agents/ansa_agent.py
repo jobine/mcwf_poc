@@ -19,25 +19,45 @@ class AnsaAgent:
     LangGraph and can be registered directly as a graph node.
 
     Args:
+        name: Logical name for this agent, used to derive graph node names.
         model_path: Path to the ANSA model file.
         script_path: Path to the Python script to execute.
+        script_kwargs: Keyword arguments forwarded to ``project.run``.
         on_stdout: Optional extra callback invoked for every ANSA stdout
             line. Use this to push lines to an SSE queue, WebSocket, etc.
-        **kwargs: Additional keyword arguments passed to ``project.run``.
     """
 
     def __init__(
         self,
+        name: str,
         model_path: str | Path,
         script_path: str | Path,
+        script_kwargs: dict | None = None,
         on_stdout: Callable[[str], None] | None = None,
-        **kwargs,
     ):
+        self._name = name
         self._model_path = Path(model_path)
         self._script_path = Path(script_path)
-        self._script_kwargs = kwargs
+        self._script_kwargs = script_kwargs or {}
 
         self._on_stdout = on_stdout
+
+    # ── properties ──────────────────────────────────────────────────
+
+    @property
+    def name(self) -> str:
+        """Logical agent name."""
+        return self._name
+
+    @property
+    def validate_node_name(self) -> str:
+        """Graph node name for the validation step."""
+        return f"validate_{self._name}_inputs"
+
+    @property
+    def run_node_name(self) -> str:
+        """Graph node name for the execution step."""
+        return f"run_{self._name}"
 
     # ── nodes ───────────────────────────────────────────────────────
 
@@ -110,9 +130,8 @@ class AnsaAgent:
 
     # ── routing helpers ─────────────────────────────────────────────
 
-    @staticmethod
-    def should_run(state: AnsaAgentState) -> str:
+    def should_run(self, state: AnsaAgentState) -> str:
         """Decide next step after validation."""
         if state.get("status") == "error":
             return "end"
-        return "run_ansa"
+        return self.run_node_name

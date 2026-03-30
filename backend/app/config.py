@@ -12,9 +12,10 @@ _BACKEND_ROOT = Path(__file__).resolve().parent.parent
 class Settings(BaseSettings):
     """Application settings loaded from environment variables / .env."""
 
-    experiments_dir: Path = _BACKEND_ROOT / "experiments"
-    scripts_dir: Path = _BACKEND_ROOT / "scripts"
-    data_shared_dir: Path = _BACKEND_ROOT / "data" / "shared"
+    experiments_dir: Path
+    scripts_dir: Path
+    data_shared_dir: Path
+    graph_config_path: Path
 
     model_config = {
         "env_file": str(_BACKEND_ROOT / ".env"),

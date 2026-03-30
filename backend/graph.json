@@ -1,0 +1,11 @@
+{
+  "agents": [
+    {
+      "name": "classifier",
+      "type": "AnsaAgent",
+      "model_path": "demo.ansa",
+      "script_path": "part_classifier.py",
+      "script_kwargs": {}
+    }
+  ]
+}
