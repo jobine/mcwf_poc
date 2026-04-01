@@ -1,9 +1,11 @@
-"""Workflow routes — REST endpoint to start workflows + WebSocket for stdout streaming.
+"""Workflow routes — REST + WebSocket endpoints for workflow execution.
 
 Architecture:
-    POST /workflow              → starts the workflow in background, returns experiment_id immediately
-    WS   /workflow/{id}/stdout  → streams real-time ANSA stdout + heartbeat; bidirectional for future HITL
-    GET  /workflow/{id}         → poll final result (optional convenience endpoint)
+    GET  /workflow               → compiled workflow graph as JSON
+    POST /experiment             → start workflow (legacy), returns experiment_id
+    POST /experiment/stream      → start workflow with event streaming, returns experiment_id
+    GET  /experiment/{id}        → poll final result
+    WS   /experiment/{id}/stream → real-time event stream (stdout, agent lifecycle, etc.)
 """
 
 from __future__ import annotations
@@ -11,35 +13,32 @@ from __future__ import annotations
 import asyncio
 import json
 import queue
+import uuid
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
 
+from app.config import settings
 from app.graph.workflow import create_ansa_workflow
 
 router = APIRouter()
 
 # ── In-memory workflow registry ─────────────────────────────────────
-# Maps experiment_id → {"stdout_q": Queue, "future": Future, "state": dict | None}
+# Maps experiment_id → {"event_q": Queue | None, "future": Future, "state": dict | None}
 _experiments: dict[str, dict] = {}
 
 # Heartbeat interval (seconds) — keeps proxies / LBs from killing idle connections.
 _HEARTBEAT_INTERVAL = 15
 
 
-# ── Helpers ─────────────────────────────────────────────────────────
+# ── Workflow runners ─────────────────────────────────────────────────
 
-async def _send_json(ws: WebSocket, event: str, data: str | dict) -> None:
-    """Send a JSON-encoded message with a standard envelope."""
-    await ws.send_json({"event": event, "data": data})
+def _run_workflow(experiment_id: str) -> None:
+    """Execute the workflow synchronously (called via run_in_executor).
 
-
-def _run_workflow(experiment_id: str, stdout_q: queue.Queue) -> None:
-    """Execute the workflow synchronously (called via run_in_executor)."""
-    def _on_stdout(line: str) -> None:
-        stdout_q.put(line)
-
-    workflow = create_ansa_workflow(on_stdout=_on_stdout)
+    Legacy runner — no event streaming.
+    """
+    workflow = create_ansa_workflow(on_event=lambda event: print(f"[EVENT] {event}"))
     final_state = workflow.invoke({
         "experiment_id": experiment_id,
         "status": "pending",
@@ -48,9 +47,54 @@ def _run_workflow(experiment_id: str, stdout_q: queue.Queue) -> None:
         "stdout_lines": [],
     })
 
-    # Store final state and signal completion.
     _experiments[experiment_id]["state"] = final_state
-    stdout_q.put(None)  # sentinel
+
+
+def _run_workflow_with_events(experiment_id: str, event_q: queue.Queue) -> None:
+    """Execute the workflow synchronously with event streaming.
+
+    All events (agent lifecycle, stdout) are pushed into *event_q* for the
+    WebSocket handler. Events are also recorded to ``events.jsonl`` for replay.
+    """
+    recorded_events: list[dict] = []
+
+    def _on_event(event: dict) -> None:
+        recorded_events.append(event)
+        event_q.put(event)
+
+    # started = {"type": "workflow_started", "data": {"experiment_id": experiment_id}}
+    # recorded_events.append(started)
+    # event_q.put(started)
+
+    try:
+        workflow = create_ansa_workflow(on_event=_on_event)
+        final_state = workflow.invoke({
+            "experiment_id": experiment_id,
+            "status": "pending",
+            "result": None,
+            "error": None,
+            "stdout_lines": [],
+        })
+
+        _experiments[experiment_id]["state"] = final_state
+
+        # completed = {"type": "workflow_completed", "data": final_state}
+        # recorded_events.append(completed)
+        # event_q.put(completed)
+    except Exception as exc:
+        error_event = {"type": "error", "data": str(exc)}
+        recorded_events.append(error_event)
+        event_q.put(error_event)
+    finally:
+        event_q.put(None)  # sentinel
+
+        # Persist events for replay
+        exp_dir = settings.experiments_dir / experiment_id
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        (exp_dir / "events.jsonl").write_text(
+            "\n".join(json.dumps(e, default=str, ensure_ascii=False) for e in recorded_events) + "\n",
+            encoding="utf-8",
+        )
 
 
 # ── GET /workflow ──────────────────────────────────────────────────────
@@ -66,22 +110,40 @@ async def get_workflow_graph():
 
 @router.post("/experiment")
 async def start_workflow():
-    """Start an ANSA workflow in the background.
+    """Start an ANSA workflow in the background (legacy endpoint).
 
-    Returns immediately with ``{"experiment_id": "..."}`` so the client
-    can open a WebSocket on ``/experiment/{id}/stdout`` for live streaming.
+    Returns immediately with ``{"experiment_id": "..."}``.
+    Use ``GET /experiment/{id}`` to poll for results.
     """
-    stdout_q: queue.Queue[str | None] = queue.Queue()
-
-    import uuid
     experiment_id = uuid.uuid4().hex
-
     loop = asyncio.get_running_loop()
 
-    entry = {"stdout_q": stdout_q, "future": None, "state": None}
+    entry = {"event_q": None, "future": None, "state": None}
     _experiments[experiment_id] = entry
 
-    future = loop.run_in_executor(None, _run_workflow, experiment_id, stdout_q)
+    future = loop.run_in_executor(None, _run_workflow, experiment_id)
+    entry["future"] = future
+
+    return JSONResponse({"experiment_id": experiment_id}, status_code=202)
+
+
+# ── POST /experiment/stream ──────────────────────────────────────────
+
+@router.post("/experiment/stream")
+async def start_workflow_stream():
+    """Start an ANSA workflow with event streaming.
+
+    Returns ``{"experiment_id": "..."}`` (202). Connect to
+    ``WS /experiment/{id}/stream`` for real-time events.
+    """
+    event_q: queue.Queue[dict | None] = queue.Queue()
+    experiment_id = uuid.uuid4().hex
+    loop = asyncio.get_running_loop()
+
+    entry = {"event_q": event_q, "future": None, "state": None}
+    _experiments[experiment_id] = entry
+
+    future = loop.run_in_executor(None, _run_workflow_with_events, experiment_id, event_q)
     entry["future"] = future
 
     return JSONResponse({"experiment_id": experiment_id}, status_code=202)
@@ -106,71 +168,58 @@ async def get_workflow_result(experiment_id: str):
     return JSONResponse({"status": "running"}, status_code=202)
 
 
-# ── WS /experiment/{id}/stdout ────────────────────────────────────────
+# ── WS /experiment/{id}/stream ────────────────────────────────────────
 
-@router.websocket("/experiment/{experiment_id}/stdout")
-async def workflow_stdout_ws(ws: WebSocket, experiment_id: str):
-    """Stream real-time ANSA stdout for a running workflow.
+@router.websocket("/experiment/{experiment_id}/stream")
+async def workflow_stream_ws(ws: WebSocket, experiment_id: str):
+    """Stream real-time workflow events over WebSocket.
 
-    **Server → Client messages** (JSON ``{"event": ..., "data": ...}``)::
+    **Server → Client messages** (JSON with ``type`` field)::
 
-        {"event": "stdout",    "data": "<line>"}       — real-time ANSA output
-        {"event": "heartbeat", "data": ""}              — keep-alive ping
-        {"event": "done",      "data": {…}}             — workflow finished, final state
-        {"event": "error",     "data": "<message>"}     — unrecoverable error
+        {"type": "workflow_started",  "data": {"experiment_id": "..."}}
+        {"type": "agent_started",     "agent": "..."}
+        {"type": "stdout",            "data": "<plain text line>"}
+        {"type": "agent_completed",   "agent": "...", "status": "..."}
+        {"type": "workflow_completed", "data": {<final_state>}}
+        {"type": "error",             "data": "<message>"}
+        {"type": "heartbeat",         "data": ""}
 
     **Client → Server messages** (reserved for future Human-in-the-loop)::
 
         {"action": "cancel"}                   — request graceful cancellation  (not yet)
         {"action": "input", "payload": ...}    — HITL reply  (not yet)
-
-    Example client (JavaScript)::
-
-        // 1. Start workflow
-        const resp = await fetch("/experiment", { method: "POST" });
-        const { experiment_id } = await resp.json();
-
-        // 2. Connect stdout stream
-        const ws = new WebSocket(`ws://host/experiment/${experiment_id}/stdout`);
-        ws.onmessage = (ev) => {
-            const msg = JSON.parse(ev.data);
-            if (msg.event === "stdout") console.log(msg.data);
-            if (msg.event === "done")  { console.log(msg.data); ws.close(); }
-        };
     """
     entry = _experiments.get(experiment_id)
-    if entry is None:
-        await ws.close(code=4004, reason="unknown experiment_id")
+    if entry is None or entry.get("event_q") is None:
+        await ws.close(code=4004, reason="unknown experiment_id or no event stream")
         return
 
     await ws.accept()
-    stdout_q: queue.Queue[str | None] = entry["stdout_q"]
+    event_q: queue.Queue[dict | None] = entry["event_q"]
 
     try:
         seconds_since_last_send = 0.0
         poll_interval = 0.05
 
         while True:
-            # Drain stdout queue
+            # Drain event queue
             drained = False
             while True:
                 try:
-                    line = stdout_q.get_nowait()
+                    event = event_q.get_nowait()
                 except queue.Empty:
                     break
-                if line is None:
+                if event is None:
                     # Sentinel — workflow finished
-                    final = entry.get("state")
-                    await _send_json(ws, "done", json.dumps(final, default=str) if final else "")
                     return
-                await _send_json(ws, "stdout", line)
+                await ws.send_json(event)
                 seconds_since_last_send = 0.0
                 drained = True
 
             if not drained:
                 seconds_since_last_send += poll_interval
                 if seconds_since_last_send >= _HEARTBEAT_INTERVAL:
-                    await _send_json(ws, "heartbeat", "")
+                    await ws.send_json({"type": "heartbeat", "data": ""})
                     seconds_since_last_send = 0.0
 
             await asyncio.sleep(poll_interval)
@@ -179,7 +228,7 @@ async def workflow_stdout_ws(ws: WebSocket, experiment_id: str):
         pass  # Client left — workflow continues in background
     except Exception as exc:
         try:
-            await _send_json(ws, "error", str(exc))
+            await ws.send_json({"type": "error", "data": str(exc)})
         except WebSocketDisconnect:
             pass
     finally:

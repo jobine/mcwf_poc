@@ -44,58 +44,58 @@ def _find_agent_config(cfg: dict, name: str) -> dict:
 
 # ── Experiment lifecycle nodes ──────────────────────────────────────
 
-def init_experiment(state: AnsaAgentState) -> AnsaAgentState:
-    """Create the experiment directory for the given experiment_id."""
-    exp_id = state["experiment_id"]
-    exp_dir = settings.experiments_dir / exp_id
-    exp_dir.mkdir(parents=True, exist_ok=True)
-    return {}
+def init_experiment(on_event: Callable[[dict], None] | None = None):
+    """Create the init_experiment node function with event emission."""
+    def execute(state: AnsaAgentState) -> AnsaAgentState:
+        """Create the experiment directory and emit workflow_init event."""
+        exp_id = state["experiment_id"]
+        exp_dir = settings.experiments_dir / exp_id
+        exp_dir.mkdir(parents=True, exist_ok=True)
+        if on_event:
+            on_event({"type": "workflow_started", "experiment_id": exp_id})
+        return {}
+    return execute
 
 
-def save_results(state: AnsaAgentState) -> AnsaAgentState:
-    """Persist the workflow result and stdout log to the experiment directory."""
-    exp_id = state.get("experiment_id", "")
-    exp_dir = settings.experiments_dir / exp_id
-    exp_dir.mkdir(parents=True, exist_ok=True)
+def deinit_experiment(on_event: Callable[[dict], None] | None = None) -> Callable[[AnsaAgentState], AnsaAgentState]:
+    """Create the deinit_experiment node function with event emission."""
+    def execute(state: AnsaAgentState) -> AnsaAgentState:
+        """Persist the workflow result and stdout log to the experiment directory."""
+        exp_id = state.get("experiment_id", "")
+        exp_dir = settings.experiments_dir / exp_id
+        exp_dir.mkdir(parents=True, exist_ok=True)
 
-    payload = {
-        "experiment_id": exp_id,
-        "status": state.get("status"),
-        "result": state.get("result"),
-        "error": state.get("error"),
-    }
-    (exp_dir / "result.json").write_text(
-        json.dumps(payload, indent=2, default=str), encoding="utf-8",
-    )
-
-    stdout_lines = state.get("stdout_lines") or []
-    if stdout_lines:
-        (exp_dir / "stdout.log").write_text(
-            "\n".join(stdout_lines) + "\n", encoding="utf-8",
+        payload = {
+            "experiment_id": exp_id,
+            "status": state.get("status"),
+            "result": state.get("result"),
+            "error": state.get("error"),
+        }
+        (exp_dir / "result.json").write_text(
+            json.dumps(payload, indent=2, default=str), encoding="utf-8",
         )
 
-    return {}
+        stdout_lines = state.get("stdout_lines") or []
+        if stdout_lines:
+            (exp_dir / "stdout.log").write_text(
+                "\n".join(stdout_lines) + "\n", encoding="utf-8",
+            )
+
+        if on_event:
+            on_event({"type": "workflow_completed", **payload})
+        return {}
+    
+    return execute
 
 
-# ── Graph construction ──────────────────────────────────────────────
+# ── Node factory ────────────────────────────────────────────────────
 
-def create_ansa_workflow(
-    on_stdout: Callable[[str], None] | None = None,
-) -> StateGraph:
-    """Build and compile the LangGraph workflow.
+def create_classifier_node(
+    on_event: Callable[[dict], None] | None = None,
+) -> tuple[str, Callable]:
+    """Build the classifier agent node from graph.json config.
 
-    Agent configuration (name, model_path, script_path, script_kwargs) is
-    read from ``graph.json`` and looked up by *agent_name*.  Paths in the
-    config are resolved using directory settings from ``.env``.
-
-    Args:
-        on_stdout: Optional callback invoked for every ANSA stdout line.
-            Used by the API layer to push lines over WebSocket.
-
-    Graph (with default agent name *classifier*)::
-
-        START ─► init_experiment ─► validate_classifier_inputs ─┬─► run_classifier ─► save_results ─► END
-                                                                └─► save_results ─► END
+    Returns (node_name, node_function).
     """
     classifier_cfg = _find_agent_config(cfg=_load_graph_config(), name="classifier")
 
@@ -104,25 +104,43 @@ def create_ansa_workflow(
         model_path=settings.data_shared_dir / classifier_cfg["model_path"],
         script_path=settings.scripts_dir / classifier_cfg["script_path"],
         script_kwargs=classifier_cfg.get("script_kwargs", {}),
-        on_stdout=on_stdout,
+        on_event=on_event,
     )
+
+    return agent.name, agent.execute
+
+
+# ── Graph construction ──────────────────────────────────────────────
+
+def create_ansa_workflow(
+    on_event: Callable[[dict], None] | None = None,
+) -> StateGraph:
+    """Build and compile the LangGraph workflow.
+
+    Agent configuration (name, model_path, script_path, script_kwargs) is
+    read from ``graph.json`` and looked up by *agent_name*.  Paths in the
+    config are resolved using directory settings from ``.env``.
+
+    Args:
+        on_event: Optional callback invoked for workflow events (stdout,
+            agent lifecycle, etc.). Each event is a dict with a ``type`` key.
+
+    Graph::
+
+        START ─► init_experiment ─► classifier ─► deinit_workflow ─► END
+    """
+    node_name, node_func = create_classifier_node(on_event=on_event)
 
     graph = StateGraph(AnsaAgentState)
 
-    graph.add_node("init_experiment", init_experiment)
-    graph.add_node(agent.validate_node_name, agent.validate_inputs)
-    graph.add_node(agent.run_node_name, agent.run_ansa, retry=RetryPolicy(max_attempts=3))
-    graph.add_node("save_results", save_results)
+    graph.add_node("init_experiment", init_experiment(on_event))
+    graph.add_node(node_name, node_func, retry=RetryPolicy(max_attempts=3))
+    graph.add_node("deinit_workflow", deinit_experiment(on_event))
 
     graph.add_edge(START, "init_experiment")
-    graph.add_edge("init_experiment", agent.validate_node_name)
-    graph.add_conditional_edges(
-        agent.validate_node_name,
-        agent.should_run,
-        {agent.run_node_name: agent.run_node_name, "end": "save_results"},
-    )
-    graph.add_edge(agent.run_node_name, "save_results")
-    graph.add_edge("save_results", END)
+    graph.add_edge("init_experiment", node_name)
+    graph.add_edge(node_name, "deinit_workflow")
+    graph.add_edge("deinit_workflow", END)
 
     return graph.compile()
 
@@ -132,7 +150,7 @@ def create_ansa_workflow(
 def run_workflow(experiment_id: str | None = None) -> AnsaAgentState:
     """One-shot helper: build the workflow, invoke it, and return final state."""
     import uuid
-    workflow = create_ansa_workflow(on_stdout=lambda line: print(f"[ANSA] {line}"))
+    workflow = create_ansa_workflow(on_event=lambda event: print(f"[EVENT] {event}"))
     return workflow.invoke({
         "experiment_id": experiment_id or uuid.uuid4().hex,
         "status": "pending",

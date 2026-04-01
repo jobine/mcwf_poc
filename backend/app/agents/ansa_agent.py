@@ -1,7 +1,7 @@
 """ANSA agent — manages ANSA-related workflow nodes.
 
-Provides :class:`AnsaAgent` whose methods serve as LangGraph node
-functions for validating inputs, launching ANSA, and running scripts.
+Provides :class:`AnsaAgent` whose :meth:`execute` method serves as a
+LangGraph node function that validates inputs, launches ANSA, and runs a script.
 """
 
 from __future__ import annotations
@@ -13,18 +13,15 @@ from app.graph.state import AnsaAgentState
 
 
 class AnsaAgent:
-    """Encapsulates all ANSA-related graph nodes.
-
-    Each public method has the signature ``(state) -> state`` expected by
-    LangGraph and can be registered directly as a graph node.
+    """Encapsulates all ANSA-related logic for a single graph node.
 
     Args:
-        name: Logical name for this agent, used to derive graph node names.
+        name: Logical name for this agent (also used as the graph node name).
         model_path: Path to the ANSA model file.
         script_path: Path to the Python script to execute.
         script_kwargs: Keyword arguments forwarded to ``project.run``.
-        on_stdout: Optional extra callback invoked for every ANSA stdout
-            line. Use this to push lines to an SSE queue, WebSocket, etc.
+        on_event: Optional callback invoked for workflow events (stdout,
+            agent lifecycle, etc.). Each event is a dict with a ``type`` key.
     """
 
     def __init__(
@@ -33,70 +30,55 @@ class AnsaAgent:
         model_path: str | Path,
         script_path: str | Path,
         script_kwargs: dict | None = None,
-        on_stdout: Callable[[str], None] | None = None,
+        on_event: Callable[[dict], None] | None = None,
     ):
         self._name = name
         self._model_path = Path(model_path)
         self._script_path = Path(script_path)
         self._script_kwargs = script_kwargs or {}
-
-        self._on_stdout = on_stdout
-
-    # ── properties ──────────────────────────────────────────────────
+        self._on_event = on_event
 
     @property
     def name(self) -> str:
-        """Logical agent name."""
+        """Logical agent name (also used as the graph node name)."""
         return self._name
 
-    @property
-    def validate_node_name(self) -> str:
-        """Graph node name for the validation step."""
-        return f"validate_{self._name}_inputs"
+    def _emit(self, event: dict) -> None:
+        if self._on_event is not None:
+            self._on_event(event)
 
-    @property
-    def run_node_name(self) -> str:
-        """Graph node name for the execution step."""
-        return f"run_{self._name}"
+    def execute(self, state: AnsaAgentState) -> AnsaAgentState:
+        """Validate inputs, then open the model and execute the script.
 
-    # ── nodes ───────────────────────────────────────────────────────
+        Emits ``agent_started``, ``stdout``, and ``agent_completed`` events.
+        """
+        self._emit({"type": "agent_started", "agent": self._name})
 
-    def validate_inputs(self, state: AnsaAgentState) -> AnsaAgentState:
-        """Validate that model and script paths exist."""
-        model = self._model_path
-        script = self._script_path
-
+        # ── validate inputs ────────────────────────────────────────
         errors: list[str] = []
-        if not model.is_file():
-            errors.append(f"Model file not found: {model}")
-        if not script.is_file():
-            errors.append(f"Script file not found: {script}")
+        if not self._model_path.is_file():
+            errors.append(f"Model file not found: {self._model_path}")
+        if not self._script_path.is_file():
+            errors.append(f"Script file not found: {self._script_path}")
 
         if errors:
+            error_msg = "; ".join(errors)
+            self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
             return {
                 "status": "error",
-                "error": "; ".join(errors),
+                "error": error_msg,
             }
 
-        return {
-            "model_path": str(model.resolve()),
-            "script_path": str(script.resolve()),
-            "status": "running",
-        }
-
-    def run_ansa(self, state: AnsaAgentState) -> AnsaAgentState:
-        """Open the model and execute the script via ``project.run``."""
+        # ── run ANSA ───────────────────────────────────────────────
         from app.core.ansa_backend import AnsaProcess
         from app.core.project import run as project_run
 
         collected_lines: list[str] = []
-        external_cb = self._on_stdout
 
         def _on_stdout(line: str) -> None:
             collected_lines.append(line)
             print(f"[ANSA] {line}", flush=True)
-            if external_cb is not None:
-                external_cb(line)
+            self._emit({"type": "stdout", "data": line})
 
         try:
             with AnsaProcess() as backend:
@@ -109,12 +91,14 @@ class AnsaAgent:
                 )
 
             if result.get("status") == "ok":
+                self._emit({"type": "agent_completed", "agent": self._name, "status": "success"})
                 return {
                     "status": "success",
                     "result": result,
                     "stdout_lines": collected_lines,
                 }
             else:
+                self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
                 return {
                     "status": "error",
                     "error": result.get("message", "Unknown error from ANSA backend"),
@@ -122,16 +106,9 @@ class AnsaAgent:
                     "stdout_lines": collected_lines,
                 }
         except Exception as exc:
+            self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
             return {
                 "status": "error",
                 "error": str(exc),
                 "stdout_lines": collected_lines,
             }
-
-    # ── routing helpers ─────────────────────────────────────────────
-
-    def should_run(self, state: AnsaAgentState) -> str:
-        """Decide next step after validation."""
-        if state.get("status") == "error":
-            return "end"
-        return self.run_node_name

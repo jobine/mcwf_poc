@@ -397,7 +397,10 @@ class AnsaProcess:
                     raw = self._process.stdout.readline()
                     if not raw:
                         break
-                    line = raw.decode('utf-8', errors='replace').rstrip('\r\n')
+                    try:
+                        line = raw.decode('utf-8').rstrip('\r\n')
+                    except UnicodeDecodeError:
+                        line = raw.decode('cp1252', errors='replace').rstrip('\r\n')
                     with self._stdout_time_lock:
                         self._last_stdout_line_time = time.monotonic()
                         self._stdout_line_count += 1

@@ -101,8 +101,8 @@ poetry run uvicorn app.api:app --host 0.0.0.0 --port 8000 --reload
 服务启动后：
 
 - Swagger UI：`http://localhost:8000/docs`
-- REST 端点：`GET /workflow`、`POST /experiment`、`GET /experiment/{id}`
-- WebSocket 端点：`ws://localhost:8000/experiment/{id}/stdout`
+- REST 端点：`GET /workflow`、`POST /experiment`、`POST /experiment/stream`、`GET /experiment/{id}`
+- WebSocket 端点：`ws://localhost:8000/experiment/{id}/stream`
 
 ### 独立运行工作流
 
@@ -147,22 +147,17 @@ Agent 的运行时配置存放在 `graph.json` 中，工作流启动时按 `name
 
 | 字段 | 说明 |
 |------|------|
-| `name` | Agent 逻辑名称，决定工作流中的节点命名（例如 `validate_classifier_inputs`、`run_classifier`） |
+| `name` | Agent 逻辑名称，同时作为工作流中的图节点名称（例如 `classifier`） |
 | `type` | Agent 类型（当前仅支持 `AnsaAgent`） |
 | `model_path` | 模型文件名，运行时与 `DATA_SHARED_DIR` 拼接为完整路径 |
 | `script_path` | 脚本文件名，运行时与 `SCRIPTS_DIR` 拼接为完整路径 |
 | `script_kwargs` | 传递给脚本执行的额外关键字参数（JSON 对象） |
 
-### 节点命名规则
-
-Agent 的 `name` 决定其在 LangGraph 工作流中的节点名称：
-
-- **验证节点**：`validate_{name}_inputs` — 例如 `validate_classifier_inputs`
-- **执行节点**：`run_{name}` — 例如 `run_classifier`
+每个 Agent 实例对应工作流中的一个节点，节点名称即 Agent 的 `name`。Agent 的 `execute()` 方法内部完成输入验证和 ANSA 执行，并通过 `on_event` 回调发出事件。
 
 ## API 接口
 
-采用 REST + WebSocket 两阶段架构：先通过 HTTP 启动工作流，再通过 WebSocket 实时接收输出。
+采用 REST + WebSocket 两阶段架构：先通过 HTTP 启动工作流，再通过 WebSocket 实时接收事件流。
 
 ### `GET /workflow`
 
@@ -172,7 +167,13 @@ Agent 的 `name` 决定其在 LangGraph 工作流中的节点名称：
 
 ### `POST /experiment`
 
-启动 ANSA 工作流（后台异步执行），立即返回 `experiment_id`。
+启动 ANSA 工作流（后台异步执行），立即返回 `experiment_id`。无事件流。
+
+- **响应 202**：`{"experiment_id": "<uuid>"}`
+
+### `POST /experiment/stream`
+
+启动 ANSA 工作流并开启事件流。返回 `experiment_id` 后，可通过 WebSocket 接收实时事件。
 
 - **响应 202**：`{"experiment_id": "<uuid>"}`
 
@@ -184,18 +185,21 @@ Agent 的 `name` 决定其在 LangGraph 工作流中的节点名称：
 - **响应 202**：工作流仍在运行，`{"status": "running"}`
 - **响应 404**：未知的 `experiment_id`
 
-### `WS /experiment/{experiment_id}/stdout`
+### `WS /experiment/{experiment_id}/stream`
 
-实时流式推送 ANSA 标准输出（含 15 秒心跳保活）。
+实时流式推送工作流事件（含 15 秒心跳保活）。需先通过 `POST /experiment/stream` 启动工作流。
 
-**服务端 → 客户端消息**（JSON 格式 `{"event": ..., "data": ...}`）：
+**服务端 → 客户端消息**（JSON 格式，含 `type` 字段）：
 
-| 事件 | 说明 |
-|------|------|
-| `stdout` | ANSA 实时输出行 |
-| `heartbeat` | 心跳保活 |
-| `done` | 工作流完成，返回最终状态 |
-| `error` | 不可恢复的错误信息 |
+| 事件类型 | 字段 | 说明 |
+|---------|------|------|
+| `workflow_started` | `experiment_id` | 工作流已初始化 |
+| `agent_started` | `agent` | Agent 节点开始执行 |
+| `stdout` | `data` | ANSA 实时输出行 |
+| `agent_completed` | `agent`, `status` | Agent 节点执行完成（`success` / `error`） |
+| `workflow_completed` | `experiment_id`, `status`, `result`, `error` | 工作流完成，含最终状态 |
+| `error` | `data` | 不可恢复的异常信息 |
+| `heartbeat` | `data` | 心跳保活（空字符串） |
 
 **客户端 → 服务端消息**（预留，暂未实现）：
 
@@ -207,84 +211,79 @@ Agent 的 `name` 决定其在 LangGraph 工作流中的节点名称：
 **客户端示例（JavaScript）：**
 
 ```javascript
-// 1. 启动工作流
-const resp = await fetch("/experiment", { method: "POST" });
+// 1. 启动带事件流的工作流
+const resp = await fetch("/experiment/stream", { method: "POST" });
 const { experiment_id } = await resp.json();
 
-// 2. 连接 stdout 流
-const ws = new WebSocket(`ws://host/experiment/${experiment_id}/stdout`);
+// 2. 连接事件流
+const ws = new WebSocket(`ws://host/experiment/${experiment_id}/stream`);
 ws.onmessage = (ev) => {
     const msg = JSON.parse(ev.data);
-    if (msg.event === "stdout") console.log(msg.data);
-    if (msg.event === "done")  { console.log(msg.data); ws.close(); }
+    switch (msg.type) {
+        case "workflow_started":  console.log("Started:", msg.experiment_id); break;
+        case "agent_started":     console.log("Agent started:", msg.agent); break;
+        case "stdout":            console.log(msg.data); break;
+        case "agent_completed":   console.log("Agent done:", msg.agent, msg.status); break;
+        case "workflow_completed": console.log("Done:", msg); ws.close(); break;
+        case "error":             console.error(msg.data); ws.close(); break;
+    }
 };
 ```
 
 ## 架构概览
 
 ```
-┌──────────────────────────────────────────────┐
-│           FastAPI Server (:8000)              │
-│  POST /experiment          → 启动工作流       │
-│  GET  /workflow            → 获取工作流图 JSON  │
-│  GET  /experiment/{id}     → 轮询结果         │
-│  WS   /experiment/{id}/stdout → 实时输出流    │
-└──────────────────┬───────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│           FastAPI Server (:8000)                  │
+│  POST /experiment          → 启动工作流（无事件流）│
+│  POST /experiment/stream   → 启动工作流（有事件流）│
+│  GET  /workflow            → 获取工作流图 JSON     │
+│  GET  /experiment/{id}     → 轮询结果              │
+│  WS   /experiment/{id}/stream → 实时事件流         │
+└──────────────────┬───────────────────────────────┘
                    ↓
-┌──────────────────────────────────────────────┐
-│       LangGraph Workflow (graph/)            │
-│  graph.json → Agent 配置（name, paths, kwargs）│
-│  .env       → 目录配置（data, scripts, ...）  │
-│                                              │
-│  START → init_experiment                     │
-│       → validate_{name}_inputs               │
-│       → run_{name} (retry×3)                 │
-│       → save_results → END                   │
-└──────────────────┬───────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│       LangGraph Workflow (graph/)                │
+│  graph.json → Agent 配置（name, paths, kwargs）   │
+│  .env       → 目录配置（data, scripts, ...）      │
+│                                                  │
+│  START → init_experiment                         │
+│       → classifier (validate + run, retry×3)     │
+│       → deinit_workflow → END                    │
+└──────────────────┬───────────────────────────────┘
                    ↓
-┌──────────────────────────────────────────────┐
-│       ANSA Backend (core/ansa_backend.py)    │
-│  AnsaProcess                                 │
-│  ├─ IAP Connection (TCP Socket)              │
-│  ├─ Stdout Reader (异步线程)                  │
-│  └─ Script Execution (参数注入)               │
-└──────────────────┬───────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│       ANSA Backend (core/ansa_backend.py)        │
+│  AnsaProcess                                     │
+│  ├─ IAP Connection (TCP Socket)                  │
+│  ├─ Stdout Reader (异步线程)                      │
+│  └─ Script Execution (参数注入)                   │
+└──────────────────┬───────────────────────────────┘
                    ↓
-┌──────────────────────────────────────────────┐
-│          ANSA (FEA Pre-processor)            │
-│  模型加载 · 脚本执行 · 网格操作 · 导出         │
-└──────────────────────────────────────────────┘
+┌──────────────────────────────────────────────────┐
+│          ANSA (FEA Pre-processor)                │
+│  模型加载 · 脚本执行 · 网格操作 · 导出             │
+└──────────────────────────────────────────────────┘
 
 输出: experiments/{experiment_id}/
   ├─ result.json    # 工作流状态 & 脚本结果
-  └─ stdout.log     # ANSA 标准输出日志
+  ├─ stdout.log     # ANSA 标准输出日志
+  └─ events.jsonl   # 事件流记录（仅 stream 模式）
 ```
 
-## 核心模块
+### 工作流节点说明
 
-| 模块 | 路径 | 说明 |
+工作流由三个顺序执行的节点组成：
+
+| 节点 | 函数 | 说明 |
 |------|------|------|
-| **AnsaAgent** | `app/agents/ansa_agent.py` | Agent 节点实现，通过 `name` 生成动态节点名称（`validate_{name}_inputs`、`run_{name}`），封装输入验证、ANSA 执行与路由逻辑 |
-| **Workflow** | `app/graph/workflow.py` | LangGraph 工作流构建，从 `graph.json` 按名称加载 Agent 配置，目录路径从 `.env` 获取 |
-| **State** | `app/graph/state.py` | `AnsaAgentState` TypedDict，工作流状态定义 |
-| **Config** | `app/config.py` | Pydantic Settings，所有路径配置从 `.env` 读取（无硬编码默认值） |
-| **AnsaProcess** | `app/core/ansa_backend.py` | ANSA 进程管理 & IAP 协议通信 |
-| **Project** | `app/core/project.py` | 项目管理、模型操作、脚本执行 |
-| **API** | `app/api/routes.py` | REST + WebSocket 路由 |
-
-## 测试
-
-```bash
-cd backend
-poetry run pytest tests/ -v
-```
-
-测试覆盖 `app/core/` 下的 ANSA 后端通信和项目管理模块。
-```
+| `init_experiment` | `workflow.init_experiment()` | 创建实验目录，发出 `workflow_started` 事件 |
+| `classifier` | `AnsaAgent.execute()` | 验证输入 → 启动 ANSA → 执行脚本（retry×3），发出 `agent_started`/`stdout`/`agent_completed` 事件 |
+| `deinit_workflow` | `workflow.deinit_experiment()` | 写入 `result.json` 和 `stdout.log`，发出 `workflow_completed` 事件 |
 
 ### 请求时序图
 
-下图展示了一次完整的实验请求流程——从浏览器发起 `POST /experiment` 到通过 WebSocket 实时接收 ANSA 输出并获取最终结果：
+下图展示了一次完整的实验请求流程——从客户端发起 `POST /experiment/stream` 到通过 WebSocket 实时接收事件并获取最终结果：
 
 ```mermaid
 sequenceDiagram
@@ -294,36 +293,42 @@ sequenceDiagram
     participant W as LangGraph Workflow
     participant A as ANSA Process
 
-    B->>F: POST /experiment
-    F->>F: 生成 experiment_id<br/>创建 stdout_q<br/>注册 _experiments
-    F->>T: run_in_executor(_run_workflow)
+    B->>F: POST /experiment/stream
+    F->>F: 生成 experiment_id<br/>创建 event_q<br/>注册 _experiments
+    F->>T: run_in_executor(_run_workflow_with_events)
     F-->>B: 202 {"experiment_id": "..."}
 
-    B->>F: WS /experiment/{id}/stdout
+    B->>F: WS /experiment/{id}/stream
     F-->>B: WebSocket 连接建立
 
     T->>W: workflow.invoke(state)
     W->>W: init_experiment<br/>创建实验目录
-    W->>W: validate_inputs<br/>校验模型 & 脚本路径
+    Note over W: → workflow_started 事件
+
+    W->>W: classifier (validate inputs)
+    Note over W: → agent_started 事件
 
     W->>A: 启动 ANSA 进程<br/>加载模型 & 执行脚本
 
     loop ANSA 实时输出
         A-->>W: stdout line
         W-->>T: on_stdout(line)
-        T-->>F: stdout_q.put(line)
-        F-->>B: {"event":"stdout","data":"<line>"}
+        T-->>F: event_q.put(stdout event)
+        F-->>B: {"type":"stdout","data":"<line>"}
     end
 
     loop 空闲保活 (每 15s)
-        F-->>B: {"event":"heartbeat","data":""}
+        F-->>B: {"type":"heartbeat","data":""}
     end
 
     A-->>W: 脚本执行完成
-    W->>W: save_results<br/>写入 result.json & stdout.log
+    Note over W: → agent_completed 事件
+
+    W->>W: deinit_workflow<br/>写入 result.json & stdout.log
+    Note over W: → workflow_completed 事件
     W-->>T: 返回 final_state
-    T-->>F: 存储 final_state<br/>stdout_q.put(None)
-    F-->>B: {"event":"done","data":{…}}
+    T-->>F: 存储 final_state<br/>event_q.put(None)
+    F-->>B: 发送剩余事件后关闭
     B->>F: 关闭 WebSocket
 
     opt 轮询结果
@@ -336,26 +341,24 @@ sequenceDiagram
 
 ### `app/api/` — API 层
 
-FastAPI 应用初始化，提供 REST 端点（启动/轮询工作流）和 WebSocket 端点（实时 stdout 流推送）。
+FastAPI 应用初始化，提供 REST 端点（启动/轮询工作流）和 WebSocket 端点（实时事件流推送）。
 
 ### `app/agents/` — 智能体节点
 
-`AnsaAgent` 封装了工作流中的 ANSA 操作节点：
+`AnsaAgent` 封装了工作流中的 ANSA 操作节点，每个 Agent 实例对应一个图节点：
 
-- **`validate_inputs`** — 验证模型文件和脚本路径
-- **`run_ansa`** — 打开模型并执行脚本（配置 `RetryPolicy`，最多重试 3 次）
-- **`should_run`** — 条件路由（验证通过则执行，否则跳至保存结果）
+- **`execute()`** — 单一入口方法：验证输入（模型/脚本路径） → 启动 ANSA 进程 → 执行脚本 → 返回结果。配置 `RetryPolicy`（最多重试 3 次）。内部通过 `on_event` 回调发出 `agent_started`、`stdout`、`agent_completed` 事件。
 
 ### `app/graph/` — 工作流
 
 - **`state.py`** — 定义工作流状态（`AnsaAgentState`）：实验 ID、模型路径、脚本路径、执行状态、结果等
-- **`workflow.py`** — 构建 LangGraph 工作流图，`run_ansa` 节点配备重试策略，提供同步/异步执行入口及 JSON 图导出
+- **`workflow.py`** — 构建 LangGraph 顺序工作流图（`init_experiment → classifier → deinit_workflow`），Agent 节点配备重试策略，提供同步/异步执行入口及 JSON 图导出。`init_experiment` 和 `deinit_experiment` 为带事件回调的节点工厂函数。
 
 ### `app/core/` — 核心功能
 
 | 模块 | 说明 |
 |------|------|
-| `ansa_backend.py` | ANSA 进程管理 & IAP 协议通信 |
+| `ansa_backend.py` | ANSA 进程管理 & IAP 协议通信（stdout 采用 UTF-8/cp1252 自适应解码） |
 | `project.py` | 项目 CRUD、模型加载/保存、脚本执行 |
 | `checks.py` | 质量检查（网格、几何、穿透、通用） |
 | `connections.py` | 连接定义读取与实现 |
@@ -371,7 +374,8 @@ FastAPI 应用初始化，提供 REST 端点（启动/轮询工作流）和 WebS
 
 ```bash
 # 运行全部测试
-poetry run pytest
+cd backend
+poetry run pytest tests/ -v
 
 # 运行指定测试文件
 poetry run pytest tests/core/test_ansa_backend.py -v
