@@ -45,6 +45,7 @@ def _run_workflow(experiment_id: str) -> None:
         "result": None,
         "error": None,
         "stdout_lines": [],
+        "stderr_lines": [],
     })
 
     _experiments[experiment_id]["state"] = final_state

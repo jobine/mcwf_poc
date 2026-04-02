@@ -73,16 +73,25 @@ class AnsaAgent:
         from app.core.ansa_backend import AnsaProcess
         from app.core.project import run as project_run
 
-        collected_lines: list[str] = []
+        collected_stdout: list[str] = []
+        collected_stderr: list[str] = []
 
         def _on_stdout(line: str) -> None:
-            collected_lines.append(line)
+            collected_stdout.append(line)
             print(f"[ANSA] {line}", flush=True)
             self._emit({"type": "stdout", "data": line})
 
+        def _on_stderr(line: str) -> None:
+            collected_stderr.append(line)
+            print(f"[ANSA:err] {line}", flush=True)
+            self._emit({"type": "stderr", "data": line})
+
         try:
             with AnsaProcess() as backend:
-                backend.start_stdout_reader(callback=_on_stdout)
+                backend.start_output_reader(
+                    on_stdout=_on_stdout,
+                    on_stderr=_on_stderr,
+                )
                 result = project_run(
                     backend=backend,
                     model_path=self._model_path.resolve(),
@@ -95,7 +104,8 @@ class AnsaAgent:
                 return {
                     "status": "success",
                     "result": result,
-                    "stdout_lines": collected_lines,
+                    "stdout_lines": collected_stdout,
+                    "stderr_lines": collected_stderr,
                 }
             else:
                 self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
@@ -103,12 +113,14 @@ class AnsaAgent:
                     "status": "error",
                     "error": result.get("message", "Unknown error from ANSA backend"),
                     "result": result,
-                    "stdout_lines": collected_lines,
+                    "stdout_lines": collected_stdout,
+                    "stderr_lines": collected_stderr,
                 }
         except Exception as exc:
             self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
             return {
                 "status": "error",
                 "error": str(exc),
-                "stdout_lines": collected_lines,
+                "stdout_lines": collected_stdout,
+                "stderr_lines": collected_stderr,
             }

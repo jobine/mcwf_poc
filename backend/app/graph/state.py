@@ -14,3 +14,4 @@ class AnsaAgentState(TypedDict, total=False):
     result: dict | None
     error: str | None
     stdout_lines: list[str]
+    stderr_lines: list[str]

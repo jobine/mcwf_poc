@@ -289,23 +289,23 @@ class TestAnsaProcess:
         mock_conn.goodbye.assert_called_once_with(shutdown=True)
 
 
-# ── start_stdout_reader ─────────────────────────────────────────────
+# ── start_output_reader ────────────────────────────────────────────
 
-class TestStartStdoutReader:
+class TestStartOutputReader:
     @patch('subprocess.Popen')
     @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
     @patch('app.core.ansa_backend._free_port', return_value=9999)
-    def test_reads_lines_via_callback(self, _mock_port, _mock_find, mock_popen):
+    def test_reads_stdout_via_callback(self, _mock_port, _mock_find, mock_popen):
         mock_proc = MagicMock()
-        # Simulate stdout producing two lines then EOF
         mock_proc.stdout.readline.side_effect = [
             b'hello world\n', b'line two\r\n', b''
         ]
+        mock_proc.stderr.readline.side_effect = [b'']
         mock_popen.return_value = mock_proc
 
         collected = []
         proc = AnsaProcess()
-        proc.start_stdout_reader(callback=collected.append)
+        proc.start_output_reader(on_stdout=collected.append, on_stderr=lambda x: None)
         proc._stdout_thread.join(timeout=2)
 
         assert collected == ['hello world', 'line two']
@@ -313,21 +313,59 @@ class TestStartStdoutReader:
     @patch('subprocess.Popen')
     @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
     @patch('app.core.ansa_backend._free_port', return_value=9999)
+    def test_reads_stderr_via_callback(self, _mock_port, _mock_find, mock_popen):
+        mock_proc = MagicMock()
+        mock_proc.stdout.readline.side_effect = [b'']
+        mock_proc.stderr.readline.side_effect = [
+            b'warning: something\n', b'error: failed\r\n', b''
+        ]
+        mock_popen.return_value = mock_proc
+
+        collected = []
+        proc = AnsaProcess()
+        proc.start_output_reader(on_stdout=lambda x: None, on_stderr=collected.append)
+        proc._stderr_thread.join(timeout=2)
+
+        assert collected == ['warning: something', 'error: failed']
+
+    @patch('subprocess.Popen')
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
+    def test_reads_both_streams(self, _mock_port, _mock_find, mock_popen):
+        mock_proc = MagicMock()
+        mock_proc.stdout.readline.side_effect = [b'out line\n', b'']
+        mock_proc.stderr.readline.side_effect = [b'err line\n', b'']
+        mock_popen.return_value = mock_proc
+
+        out, err = [], []
+        proc = AnsaProcess()
+        proc.start_output_reader(on_stdout=out.append, on_stderr=err.append)
+        proc._stdout_thread.join(timeout=2)
+        proc._stderr_thread.join(timeout=2)
+
+        assert out == ['out line']
+        assert err == ['err line']
+
+    @patch('subprocess.Popen')
+    @patch('app.core.ansa_backend.find_ansa', return_value='/usr/bin/ansa')
+    @patch('app.core.ansa_backend._free_port', return_value=9999)
     def test_only_starts_once(self, _mock_port, _mock_find, mock_popen):
         mock_proc = MagicMock()
-        # Keep the thread alive by blocking on readline until stop event
         barrier = threading.Event()
         mock_proc.stdout.readline.side_effect = lambda: (barrier.wait() and b'') or b''
+        mock_proc.stderr.readline.side_effect = lambda: (barrier.wait() and b'') or b''
         mock_popen.return_value = mock_proc
 
         proc = AnsaProcess()
-        proc.start_stdout_reader(callback=lambda x: None)
-        first_thread = proc._stdout_thread
-        proc.start_stdout_reader(callback=lambda x: None)
-        assert proc._stdout_thread is first_thread
+        proc.start_output_reader(on_stdout=lambda x: None, on_stderr=lambda x: None)
+        first_stdout = proc._stdout_thread
+        first_stderr = proc._stderr_thread
+        proc.start_output_reader(on_stdout=lambda x: None, on_stderr=lambda x: None)
+        assert proc._stdout_thread is first_stdout
+        assert proc._stderr_thread is first_stderr
         # Clean up
         barrier.set()
-        proc.stop_stdout_reader(timeout=2)
+        proc.stop_output_reader(timeout=2)
 
 
 # ── inject_script / build_script ────────────────────────────────────

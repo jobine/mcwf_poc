@@ -81,6 +81,12 @@ def deinit_experiment(on_event: Callable[[dict], None] | None = None) -> Callabl
                 "\n".join(stdout_lines) + "\n", encoding="utf-8",
             )
 
+        stderr_lines = state.get("stderr_lines") or []
+        if stderr_lines:
+            (exp_dir / "stderr.log").write_text(
+                "\n".join(stderr_lines) + "\n", encoding="utf-8",
+            )
+
         if on_event:
             on_event({"type": "workflow_completed", **payload})
         return {}
@@ -157,6 +163,7 @@ def run_workflow(experiment_id: str | None = None) -> AnsaAgentState:
         "result": None,
         "error": None,
         "stdout_lines": [],
+        "stderr_lines": [],
     })
 
 
