@@ -150,7 +150,7 @@ def create_ansa_workflow(
 def run_workflow(experiment_id: str | None = None) -> AnsaAgentState:
     """One-shot helper: build the workflow, invoke it, and return final state."""
     import uuid
-    workflow = create_ansa_workflow(on_event=lambda event: print(f"[EVENT] {event}"))
+    workflow = create_ansa_workflow()
     return workflow.invoke({
         "experiment_id": experiment_id or uuid.uuid4().hex,
         "status": "pending",

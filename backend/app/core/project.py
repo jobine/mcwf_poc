@@ -311,9 +311,6 @@ def run(
         quiet_period_ms: Optional stdout quiet window before returning run result.
         quiet_max_wait_ms: Max wait for quiet window.
     """
-    if hasattr(backend, "start_stdout_reader"):
-        backend.start_stdout_reader(callback=lambda line: print(f'[ANSA] {line}'))
-
     open_result = open_model(
         backend,
         model_path,
@@ -343,6 +340,7 @@ if __name__ == "__main__":
     from app.core.ansa_backend import AnsaProcess
 
     with AnsaProcess() as ansa:
+        ansa.start_stdout_reader(callback=lambda line: print(f'[ANSA] {line}'))
         result = run(
             backend=ansa,
             # model_path=r"D:\Code\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct-s.ansa", 

@@ -3,8 +3,8 @@
     {
       "name": "classifier",
       "type": "AnsaAgent",
-      "model_path": "demo.ansa",
-      "script_path": "part_classifier.py",
+      "model_path": "JA20-53-000.CATProduct.ansa",
+      "script_path": "model_classification.py",
       "script_kwargs": {}
     }
   ]
