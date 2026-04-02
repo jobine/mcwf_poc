@@ -4,7 +4,7 @@
       "name": "classifier",
       "type": "AnsaAgent",
       "model_path": "JA20-53-000.CATProduct.ansa",
-      "script_path": "model_classification.py",
+      "script_path": "model_classification/model_classification.py",
       "script_kwargs": {}
     }
   ]

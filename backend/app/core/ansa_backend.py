@@ -336,8 +336,7 @@ class AnsaConnection:
 class AnsaProcess:
     """Manages an ANSA process running in listener/batch mode."""
 
-    def __init__(self, ansa_command=None, batch=True, port=None,
-                 extra_args=None, timeout=120):
+    def __init__(self, ansa_command=None, batch=True, port=None, extra_args=['--skip-release-highlights'], timeout=120):
         if ansa_command is None:
             ansa_command = find_ansa()
 
