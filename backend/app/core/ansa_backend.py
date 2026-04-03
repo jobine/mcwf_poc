@@ -6,6 +6,7 @@ sent for execution and results are returned.
 """
 
 import os
+from pathlib import Path
 import platform
 import shutil
 import socket
@@ -506,7 +507,7 @@ class AnsaProcess:
                              Set 0 to disable (default).
             quiet_max_wait_ms: Max wait time for quiet window.
         """
-        script_text = inject_script(script_text, function_name or "main", **kwargs)
+        script_text = _inject_script(script_text, function_name or "main", **kwargs)
         result = self.connection.run_script(script_text, function_name, keep_database)
         if quiet_period_ms > 0:
             self._wait_for_quiet_output(
@@ -541,43 +542,32 @@ class AnsaProcess:
         self.shutdown()
 
 
-# ── Script builder helpers ──────────────────────────────────────────
+# ── Script / result helpers ─────────────────────────────────────────
 
-def build_script(code, imports=None, function_name="main", **kwargs):
-    """Build a complete ANSA Python script with imports and entry point.
+def _is_backend_result_ok(result):
+    """Return True when ANSA IAP call succeeded and payload status is ok (if present)."""
+    if not isinstance(result, dict):
+        return False
+    if not result.get("success"):
+        return False
 
-    Args:
-        code: The script body (will be indented inside the function).
-        imports: List of import statements (default: ansa basics).
-        function_name: Entry function name.
-        **kwargs: Additional keyword arguments to pass to the script.
-    Returns:
-        Tuple of (script_text, function_name).
-    """
-    if imports is None:
-        imports = [
-            "import os",
-            "import json",
-            "import ansa",
-            "from ansa import base",
-            "from ansa import constants",
-            "from ansa import utils",
-        ]
-
-    import_block = "\n".join(imports)
-    indented = textwrap.indent(code, "    ")
-
-    script = f"""{import_block}
-
-def {function_name}():
-{indented}
-"""
-    script = inject_script(script, function_name, **kwargs)
-
-    return script, function_name
+    payload = result.get("result")
+    if isinstance(payload, dict) and "status" in payload:
+        return payload.get("status") == "ok"
+    return True
 
 
-def inject_script(script: str, function_name: str = "main", **kwargs) -> str:
+def _backend_result_error(prefix, result):
+    """Build a consistent debug-friendly error string from backend response."""
+    if not isinstance(result, dict):
+        return f"{prefix}: invalid result type={type(result).__name__}"
+    return (
+        f"{prefix}: success={result.get('success')}, "
+        f"details={result.get('details')}, result={result.get('result')}"
+    )
+
+
+def _inject_script(script: str, function_name: str = "main", **kwargs) -> str:
     """Inject keyword arguments as variable declarations at the top of a function.
 
     Each kwarg is inserted as a local variable assignment at the beginning of
@@ -623,6 +613,91 @@ def inject_script(script: str, function_name: str = "main", **kwargs) -> str:
     return "".join(lines)
 
 
+def _prepend_path_preamble(script_text: str, script_path: str) -> str:
+    """Prepend a preamble that restores the original script path context.
+
+    When ANSA executes a script received via IAP, it saves it to a temp file,
+    so ``__file__`` points to the temp directory.  This preamble overrides
+    ``__file__`` with the original path and adds the script's directory to
+    ``sys.path`` so that relative imports and config-file lookups work.
+    """
+    script_path = str(script_path).replace("\\", "/")
+    script_dir = str(Path(script_path).parent).replace("\\", "/")
+    preamble = (
+        f"import sys as __sys\n"
+        f'__file__ = r"{script_path}"\n'
+        f'if r"{script_dir}" not in __sys.path:\n'
+        f'    __sys.path.insert(0, r"{script_dir}")\n'
+        f"del __sys\n"
+    )
+    return preamble + script_text
+
+
+def _resolve_script_content(script):
+    """Resolve script input to executable source code.
+
+    Supports:
+    - pathlib.Path / os.PathLike: read file content and prepend path preamble
+    - str path to an existing file: read file content and prepend path preamble
+    - str script body: use as-is (no preamble)
+    """
+    if isinstance(script, os.PathLike):
+        resolved = Path(script).resolve()
+        with resolved.open("r", encoding="utf-8") as f:
+            content = f.read()
+        return _prepend_path_preamble(content, str(resolved))
+
+    if isinstance(script, str):
+        try:
+            candidate = Path(script).expanduser()
+            if candidate.is_file():
+                resolved = candidate.resolve()
+                with resolved.open("r", encoding="utf-8") as f:
+                    content = f.read()
+                return _prepend_path_preamble(content, str(resolved))
+        except (OSError, ValueError):
+            pass
+        return script
+
+    return str(script)
+
+
+# ── Script builder helpers ──────────────────────────────────────────
+
+def build_script(code, imports=None, function_name="main", **kwargs):
+    """Build a complete ANSA Python script with imports and entry point.
+
+    Args:
+        code: The script body (will be indented inside the function).
+        imports: List of import statements (default: ansa basics).
+        function_name: Entry function name.
+        **kwargs: Additional keyword arguments to pass to the script.
+    Returns:
+        Tuple of (script_text, function_name).
+    """
+    if imports is None:
+        imports = [
+            "import os",
+            "import json",
+            "import ansa",
+            "from ansa import base",
+            "from ansa import constants",
+            "from ansa import utils",
+        ]
+
+    import_block = "\n".join(imports)
+    indented = textwrap.indent(code, "    ")
+
+    script = f"""{import_block}
+
+def {function_name}():
+{indented}
+"""
+    script = _inject_script(script, function_name, **kwargs)
+
+    return script, function_name
+
+
 if __name__ == "__main__":
     # Example usage
     with AnsaProcess() as ansa:
@@ -632,6 +707,6 @@ def main():
 """
         print("Original script:")
         print(script)
-        script = inject_script(script, function_name="main", a='hello', b=True, c=[1, 2, 3], d = {'key': 'value'})
+        script = _inject_script(script, function_name="main", a='hello', b=True, c=[1, 2, 3], d = {'key': 'value'})
         print("Generated script:")
         print(script)

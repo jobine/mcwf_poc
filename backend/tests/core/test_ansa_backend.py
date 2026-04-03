@@ -19,8 +19,9 @@ from app.core.ansa_backend import (
     _pack_ies,
     AnsaConnection,
     AnsaProcess,
-    inject_script,
+    _inject_script,
     build_script,
+    _prepend_path_preamble,
 )
 
 
@@ -373,17 +374,17 @@ class TestStartOutputReader:
 class TestInjectScript:
     def test_no_kwargs_returns_unchanged(self):
         script = "def main():\n    pass\n"
-        assert inject_script(script, "main") == script
+        assert _inject_script(script, "main") == script
 
     def test_injects_string_variable(self):
         script = "def main():\n    print('hi')\n"
-        result = inject_script(script, "main", name="alice")
+        result = _inject_script(script, "main", name="alice")
         assert "name = 'alice'" in result
         assert "print('hi')" in result
 
     def test_injects_multiple_kwargs(self):
         script = "def main():\n    pass\n"
-        result = inject_script(script, "main", x=1, y=True, z=[1, 2])
+        result = _inject_script(script, "main", x=1, y=True, z=[1, 2])
         assert "x = 1" in result
         assert "y = True" in result
         assert "z = [1, 2]" in result
@@ -391,11 +392,11 @@ class TestInjectScript:
     def test_raises_on_missing_function(self):
         script = "def other():\n    pass\n"
         with pytest.raises(ValueError, match="Function 'main' not found"):
-            inject_script(script, "main", a=1)
+            _inject_script(script, "main", a=1)
 
     def test_preserves_indentation(self):
         script = "def main():\n    x = 10\n    return x\n"
-        result = inject_script(script, "main", val=42)
+        result = _inject_script(script, "main", val=42)
         lines = result.splitlines()
         for line in lines:
             if "val = 42" in line:
@@ -431,3 +432,38 @@ class TestBuildScript:
         code = "return x"
         script, func = build_script(code, function_name="main", x=42)
         assert "x = 42" in script
+
+
+# ── _prepend_path_preamble ─────────────────────────────────────────
+
+class TestPrependPathPreamble:
+    def test_overrides_file(self):
+        script = "def main():\n    pass\n"
+        result = _prepend_path_preamble(script, "/some/dir/script.py")
+        assert '__file__ = r"/some/dir/script.py"' in result
+        assert "def main():" in result
+
+    def test_adds_sys_path(self):
+        script = "def main():\n    pass\n"
+        result = _prepend_path_preamble(script, "/some/dir/script.py")
+        assert '"/some/dir"' in result
+        assert "sys.path.insert(0" in result
+
+    def test_normalizes_backslashes(self):
+        script = "x = 1\n"
+        result = _prepend_path_preamble(script, "D:\\Work\\scripts\\test.py")
+        assert "D:/Work/scripts/test.py" in result
+        assert "D:/Work/scripts" in result
+
+    def test_original_content_preserved(self):
+        script = "import os\n_SCRIPT_DIR = os.path.dirname(__file__)\ndef main():\n    pass\n"
+        result = _prepend_path_preamble(script, "/a/b/c.py")
+        assert "_SCRIPT_DIR = os.path.dirname(__file__)" in result
+
+    def test_inject_script_works_with_preamble(self):
+        """inject_script should still find def main() after preamble."""
+        script = "def main():\n    print('hi')\n"
+        with_preamble = _prepend_path_preamble(script, "/x/y.py")
+        result = _inject_script(with_preamble, "main", val=42)
+        assert "val = 42" in result
+        assert '__file__' in result

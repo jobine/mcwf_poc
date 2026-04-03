@@ -5,6 +5,12 @@ import os
 from pathlib import Path
 import time
 
+from app.core.ansa_backend import (
+    _is_backend_result_ok,
+    _backend_result_error,
+    _resolve_script_content,
+)
+
 
 def _locked_save_json(path, data, **dump_kwargs):
     """Atomically write JSON with exclusive file locking."""
@@ -55,53 +61,6 @@ DECKS = {
     "cgns": "CGNS",
 }
 
-
-def _is_backend_result_ok(result):
-    """Return True when ANSA IAP call succeeded and payload status is ok (if present)."""
-    if not isinstance(result, dict):
-        return False
-    if not result.get("success"):
-        return False
-
-    payload = result.get("result")
-    if isinstance(payload, dict) and "status" in payload:
-        return payload.get("status") == "ok"
-    return True
-
-
-def _backend_result_error(prefix, result):
-    """Build a consistent debug-friendly error string from backend response."""
-    if not isinstance(result, dict):
-        return f"{prefix}: invalid result type={type(result).__name__}"
-    return (
-        f"{prefix}: success={result.get('success')}, "
-        f"details={result.get('details')}, result={result.get('result')}"
-    )
-
-
-def _resolve_script_content(script):
-    """Resolve script input to executable source code.
-
-    Supports:
-    - pathlib.Path / os.PathLike: read file content
-    - str path to an existing file: read file content
-    - str script body: use as-is
-    """
-    if isinstance(script, os.PathLike):
-        with Path(script).open("r", encoding="utf-8") as f:
-            return f.read()
-
-    if isinstance(script, str):
-        try:
-            candidate = Path(script).expanduser()
-            if candidate.is_file():
-                with candidate.open("r", encoding="utf-8") as f:
-                    return f.read()
-        except (OSError, ValueError):
-            pass
-        return script
-
-    return str(script)
 
 
 def create_project(name, deck="nastran", output_path=None):

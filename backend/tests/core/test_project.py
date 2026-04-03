@@ -17,6 +17,8 @@ from app.core.project import (
     get_model_info,
     new_session,
     run,
+)
+from app.core.ansa_backend import (
     _is_backend_result_ok,
     _backend_result_error,
     _resolve_script_content,
@@ -70,6 +72,9 @@ class TestResolveScriptContent:
         try:
             content = _resolve_script_content(path)
             assert "# from file" in content
+            # Preamble should override __file__ to the original path
+            assert "__file__" in content
+            assert "sys.path" in content
         finally:
             path.unlink()
 
@@ -79,9 +84,26 @@ class TestResolveScriptContent:
             f.flush()
             name = f.name
         try:
-            assert _resolve_script_content(name) == "hello_script"
+            content = _resolve_script_content(name)
+            assert "hello_script" in content
+            # Preamble should be present for file-based input
+            assert "__file__" in content
         finally:
             os.unlink(name)
+
+    def test_preamble_contains_original_directory(self):
+        with tempfile.TemporaryDirectory() as td:
+            script_path = Path(td) / "test_script.py"
+            script_path.write_text("def main():\n    pass\n", encoding="utf-8")
+            content = _resolve_script_content(script_path)
+            # Preamble should add the script's directory to sys.path
+            script_dir = str(script_path.parent.resolve()).replace("\\", "/")
+            assert script_dir in content
+
+    def test_no_preamble_for_inline_script(self):
+        content = _resolve_script_content("def main():\n    return 1\n")
+        assert "__file__" not in content
+        assert "sys.path" not in content
 
 
 # ── Project CRUD ────────────────────────────────────────────────────

@@ -78,7 +78,7 @@ class AnsaAgent:
 
         def _on_stdout(line: str) -> None:
             collected_stdout.append(line)
-            print(f"[ANSA] {line}", flush=True)
+            print(f"[ANSA:out] {line}", flush=True)
             self._emit({"type": "stdout", "data": line})
 
         def _on_stderr(line: str) -> None:
