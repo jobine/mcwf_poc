@@ -262,8 +262,7 @@ class AnsaConnection:
                 raise RuntimeError("ANSA handshake failed")
         return True
 
-    def run_script(self, script_text, function_name=None,
-                   keep_database=True, muted=False):
+    def run_script(self, script_text, function_name=None, keep_database=True, muted=False):
         """Execute a Python script on the remote ANSA process.
 
         Args:
@@ -495,19 +494,20 @@ class AnsaProcess:
 
             time.sleep(poll_s)
 
-    def run_script(self, script_text, function_name=None, keep_database=True,
-                   quiet_period_ms=0, quiet_max_wait_ms=1200, **kwargs):
+    def run_script(self, script: str | os.PathLike, script_kwargs: dict | None = None, function_name: str = "main", keep_database: bool = True, quiet_period_ms: int = 200, quiet_max_wait_ms: int = 1200):
         """Execute a script on the ANSA process.
 
         Args:
-            script_text: Python source code to execute.
+            script: Python source code or path to a script file to execute.
+            script_kwargs: Optional keyword arguments to inject into the script.
             function_name: Optional entry function to call.
             keep_database: If True, keep database between executions.
             quiet_period_ms: Optional stdout quiet window before returning.
                              Set 0 to disable (default).
             quiet_max_wait_ms: Max wait time for quiet window.
         """
-        script_text = _inject_script(script_text, function_name or "main", **kwargs)
+        script_text = _resolve_script_content(script, script_kwargs, function_name)
+        # script_text = _inject_script(script_text, script_kwargs or {}, function_name or "main")
         result = self.connection.run_script(script_text, function_name, keep_database)
         if quiet_period_ms > 0:
             self._wait_for_quiet_output(
@@ -567,7 +567,7 @@ def _backend_result_error(prefix, result):
     )
 
 
-def _inject_script(script: str, function_name: str = "main", **kwargs) -> str:
+def _inject_script(script_text: str, script_kwargs: dict = {}, function_name: str = "main") -> str:
     """Inject keyword arguments as variable declarations at the top of a function.
 
     Each kwarg is inserted as a local variable assignment at the beginning of
@@ -575,16 +575,16 @@ def _inject_script(script: str, function_name: str = "main", **kwargs) -> str:
     None, list, tuple, dict, set, bytes) are supported.
 
     Args:
-        script: The original script text.
+        script_text: The original script text.
         function_name: Name of the target function to inject into.
-        **kwargs: Key-value pairs to declare as variables.
+        script_kwargs: Key-value pairs to declare as variables.
     Returns:
         The modified script text with injected variable declarations.
     """
-    if not kwargs:
-        return script
+    if not script_kwargs:
+        return script_text
 
-    lines = script.splitlines(keepends=True)
+    lines = script_text.splitlines(keepends=True)
     # Locate the "def <function_name>(...):" line
     pattern = f"def {function_name}("
     insert_idx = None
@@ -606,7 +606,7 @@ def _inject_script(script: str, function_name: str = "main", **kwargs) -> str:
         raise ValueError(f"Function '{function_name}' not found in script")
 
     decl_lines = []
-    for key, value in kwargs.items():
+    for key, value in script_kwargs.items():
         decl_lines.append(f"{indent}{key} = {value!r}\n")
 
     lines[insert_idx:insert_idx] = decl_lines
@@ -633,7 +633,7 @@ def _prepend_path_preamble(script_text: str, script_path: str) -> str:
     return preamble + script_text
 
 
-def _resolve_script_content(script):
+def _resolve_script_content(script: str | os.PathLike, script_kwargs: dict | None = None, function_name: str = "main") -> str:
     """Resolve script input to executable source code.
 
     Supports:
@@ -641,11 +641,12 @@ def _resolve_script_content(script):
     - str path to an existing file: read file content and prepend path preamble
     - str script body: use as-is (no preamble)
     """
+
     if isinstance(script, os.PathLike):
         resolved = Path(script).resolve()
         with resolved.open("r", encoding="utf-8") as f:
             content = f.read()
-        return _prepend_path_preamble(content, str(resolved))
+        script_text = _prepend_path_preamble(content, str(resolved))
 
     if isinstance(script, str):
         try:
@@ -654,17 +655,20 @@ def _resolve_script_content(script):
                 resolved = candidate.resolve()
                 with resolved.open("r", encoding="utf-8") as f:
                     content = f.read()
-                return _prepend_path_preamble(content, str(resolved))
+                script_text = _prepend_path_preamble(content, str(resolved))
         except (OSError, ValueError):
             pass
-        return script
+        
+        script_text = script
 
-    return str(script)
+    script_text = _inject_script(script_text=script_text, script_kwargs=script_kwargs, function_name=function_name)
+
+    return str(script_text)
 
 
 # ── Script builder helpers ──────────────────────────────────────────
 
-def build_script(code, imports=None, function_name="main", **kwargs):
+def build_script(script_text: str, script_kwargs: dict | None = None, imports: list[str] | None = None, function_name: str = "main", **kwargs) -> tuple[str, str]:
     """Build a complete ANSA Python script with imports and entry point.
 
     Args:
@@ -686,14 +690,14 @@ def build_script(code, imports=None, function_name="main", **kwargs):
         ]
 
     import_block = "\n".join(imports)
-    indented = textwrap.indent(code, "    ")
+    indented = textwrap.indent(script_text, "    ")
 
     script = f"""{import_block}
 
 def {function_name}():
 {indented}
 """
-    script = _inject_script(script, function_name, **kwargs)
+    script = _inject_script(script_text=script, script_kwargs=script_kwargs, function_name=function_name)
 
     return script, function_name
 

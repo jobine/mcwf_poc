@@ -117,7 +117,7 @@ def save_project(project, path=None):
     return project
 
 
-def open_model(backend, model_path, project=None, quiet_period_ms: int = 0, quiet_max_wait_ms: int = 1200):
+def open_model(backend, model_path, project=None, quiet_period_ms: int = 200, quiet_max_wait_ms: int = 1200):
     """Open an ANSA model file via the backend.
 
     Args:
@@ -144,8 +144,8 @@ def main():
     return result
 '''
     result = backend.run_script(
-        script,
-        "main",
+        script=script,
+        function_name="main",
         keep_database=False,
         quiet_period_ms=quiet_period_ms,
         quiet_max_wait_ms=quiet_max_wait_ms,
@@ -251,63 +251,3 @@ def main():
 '''
     return backend.run_script(script, "main")
 
-def run(
-    backend: 'AnsaProcess',
-    model_path: Path,
-    script: os.PathLike | str,
-    project=None,
-    quiet_period_ms: int = 200,
-    quiet_max_wait_ms: int = 1200,
-    **kwargs
-):
-    """Open a model and run a script on it.
-
-    Args:
-        backend: AnsaProcess instance.
-        model_path: Model path to open.
-        script: Script path or script content.
-        project: Optional project state dict.
-        quiet_period_ms: Optional stdout quiet window before returning run result.
-        quiet_max_wait_ms: Max wait for quiet window.
-    """
-    open_result = open_model(
-        backend,
-        model_path,
-        project,
-        quiet_period_ms=quiet_period_ms,
-        quiet_max_wait_ms=quiet_max_wait_ms,
-    )
-    if not _is_backend_result_ok(open_result):
-        return {"status": "error", "message": _backend_result_error("Failed to open model", open_result)}
-
-    script_content = _resolve_script_content(script)    
-    run_result = backend.run_script(
-        script_content,
-        "main",
-        quiet_period_ms=quiet_period_ms,
-        quiet_max_wait_ms=quiet_max_wait_ms,
-        **kwargs
-    )
-    if not _is_backend_result_ok(run_result):
-        return {"status": "error", "message": _backend_result_error("Script execution failed", run_result)}
-
-    return {"status": "ok", "open_result": open_result, "run_result": run_result}
-
-
-if __name__ == "__main__":
-    # Example usage
-    from app.core.ansa_backend import AnsaProcess
-
-    with AnsaProcess() as ansa:
-        ansa.start_stdout_reader(callback=lambda line: print(f'[ANSA] {line}'))
-        result = run(
-            backend=ansa,
-            # model_path=r"D:\Code\tools\ansa\agent-harness\cli_anything\ansa\tests\data\JA10-53-010.CATProduct-s.ansa", 
-            # script=r"D:\Code\tools\ansa\agent-harness\cli_anything\ansa\tests\data\part_classifier.py"
-            model_path=r'D:\Workspace\mcwf_poc\backend\data\shared\demo.ansa',
-            script=r'D:\Workspace\mcwf_poc\backend\scripts\part_classifier.py',
-            extra_arg1='value1',
-            extra_arg2=42,
-        )
-
-        print("Run result:", result)

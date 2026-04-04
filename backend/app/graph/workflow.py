@@ -105,15 +105,15 @@ def create_classifier_node(
     """
     classifier_cfg = _find_agent_config(cfg=_load_graph_config(), name="classifier")
 
-    agent = AnsaAgent(
+    agent_node = AnsaAgent(
         name=classifier_cfg["name"],
         model_path=settings.data_shared_dir / classifier_cfg["model_path"],
         script_path=settings.scripts_dir / classifier_cfg["script_path"],
-        script_kwargs=classifier_cfg.get("script_kwargs", {}),
+        script_kwargs=classifier_cfg.get("script_kwargs"),
         on_event=on_event,
     )
 
-    return agent.name, agent.execute
+    return agent_node
 
 
 # ── Graph construction ──────────────────────────────────────────────
@@ -135,17 +135,17 @@ def create_ansa_workflow(
 
         START ─► init_experiment ─► classifier ─► deinit_workflow ─► END
     """
-    node_name, node_func = create_classifier_node(on_event=on_event)
+    classifier_node = create_classifier_node(on_event=on_event)
 
     graph = StateGraph(AnsaAgentState)
 
     graph.add_node("init_experiment", init_experiment(on_event))
-    graph.add_node(node_name, node_func, retry=RetryPolicy(max_attempts=3))
+    graph.add_node(classifier_node.name, classifier_node.execute, retry=RetryPolicy(max_attempts=3))
     graph.add_node("deinit_workflow", deinit_experiment(on_event))
 
     graph.add_edge(START, "init_experiment")
-    graph.add_edge("init_experiment", node_name)
-    graph.add_edge(node_name, "deinit_workflow")
+    graph.add_edge("init_experiment", classifier_node.name)
+    graph.add_edge(classifier_node.name, "deinit_workflow")
     graph.add_edge("deinit_workflow", END)
 
     return graph.compile()

@@ -6,9 +6,10 @@ LangGraph node function that validates inputs, launches ANSA, and runs a script.
 
 from __future__ import annotations
 
+import ast
 from collections.abc import Callable
 from pathlib import Path
-
+from app.core.ansa_backend import _backend_result_error
 from app.graph.state import AnsaAgentState
 
 
@@ -27,15 +28,15 @@ class AnsaAgent:
     def __init__(
         self,
         name: str,
-        model_path: str | Path,
-        script_path: str | Path,
-        script_kwargs: dict | None = None,
+        model_path: str | Path | None = None,
+        script_path: str | Path | None = None,
+        script_kwargs: str | None = None,
         on_event: Callable[[dict], None] | None = None,
     ):
         self._name = name
-        self._model_path = Path(model_path)
-        self._script_path = Path(script_path)
-        self._script_kwargs = script_kwargs or {}
+        self._model_path = Path(model_path) if model_path else None
+        self._script_path = Path(script_path) if script_path else None
+        self._script_kwargs = ast.literal_eval(script_kwargs) if script_kwargs else {}
         self._on_event = on_event
 
     @property
@@ -70,8 +71,8 @@ class AnsaAgent:
             }
 
         # ── run ANSA ───────────────────────────────────────────────
-        from app.core.ansa_backend import AnsaProcess
-        from app.core.project import run as project_run
+        from app.core.ansa_backend import AnsaProcess, _is_backend_result_ok
+        from app.core.project import open_model
 
         collected_stdout: list[str] = []
         collected_stderr: list[str] = []
@@ -92,12 +93,20 @@ class AnsaAgent:
                     on_stdout=_on_stdout,
                     on_stderr=_on_stderr,
                 )
-                result = project_run(
-                    backend=backend,
-                    model_path=self._model_path.resolve(),
-                    script=self._script_path.resolve(),
-                    **self._script_kwargs,
+
+                model_result = open_model(backend=backend, model_path=self._model_path.resolve())
+                if not _is_backend_result_ok(model_result):
+                    result = {"status": "error", "message": _backend_result_error("Failed to open model", model_result)}
+
+                script_result = backend.run_script(
+                    script=self._script_path,
+                    script_kwargs=self._script_kwargs
                 )
+                if not _is_backend_result_ok(script_result):
+                    result = {"status": "error", "message": _backend_result_error("Script execution failed", script_result)}
+
+                result = {"status": "ok", "model_result": model_result, "script_result": script_result}
+
 
             if result.get("status") == "ok":
                 self._emit({"type": "agent_completed", "agent": self._name, "status": "success"})
