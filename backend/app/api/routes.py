@@ -2,6 +2,7 @@
 
 Architecture:
     GET  /workflow               → compiled workflow graph as JSON
+    GET  /experiments            → list all experiment IDs (newest first)
     POST /experiment             → start workflow (legacy), returns experiment_id
     POST /experiment/stream      → start workflow with event streaming, returns experiment_id
     GET  /experiment/{id}        → poll final result
@@ -96,6 +97,20 @@ def _run_workflow_with_events(experiment_id: str, event_q: queue.Queue) -> None:
             "\n".join(json.dumps(e, default=str, ensure_ascii=False) for e in recorded_events) + "\n",
             encoding="utf-8",
         )
+
+
+# ── GET /experiments ──────────────────────────────────────────────────
+
+@router.get("/experiments")
+async def list_experiments():
+    """List all experiment IDs, sorted by creation time (newest first)."""
+    exp_dir = settings.experiments_dir
+    if not exp_dir.exists():
+        return JSONResponse([])
+
+    dirs = [d for d in exp_dir.iterdir() if d.is_dir()]
+    dirs.sort(key=lambda d: d.stat().st_birthtime, reverse=True)
+    return JSONResponse([{"experiment_id": d.name, "created_at": d.stat().st_birthtime} for d in dirs])
 
 
 # ── GET /workflow ──────────────────────────────────────────────────────
