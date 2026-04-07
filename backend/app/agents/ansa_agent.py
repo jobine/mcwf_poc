@@ -67,7 +67,9 @@ class AnsaAgent:
         errors: list[str] = []
         if self._model_path and not self._model_path.is_file():
             errors.append(f"Model file not found: {self._model_path}")
-        if self._script_path and not self._script_path.is_file():
+        if not self._script_path:
+            errors.append("No script configured")
+        elif not self._script_path.is_file():
             errors.append(f"Script file not found: {self._script_path}")
 
         if errors:

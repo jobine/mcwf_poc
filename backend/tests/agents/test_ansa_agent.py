@@ -129,6 +129,27 @@ class TestAnsaAgentErrorHandling:
         assert result["status"] == "error"
         assert "process_id" in result
 
+    @patch("app.agents.ansa_agent.open_model")
+    @patch("app.agents.ansa_agent.AnsaProcess")
+    def test_open_model_failure_returns_error(self, MockProcess, mock_open_model):
+        """When open_model fails, agent returns error with process_id preserved."""
+        mock_backend = MagicMock()
+        MockProcess.return_value = mock_backend
+        mock_open_model.return_value = {"success": False, "details": None, "result": None}
+
+        registry = ProcessRegistry()
+        script_path = MagicMock(spec=Path)
+        script_path.is_file.return_value = True
+        model_path = MagicMock(spec=Path)
+        model_path.is_file.return_value = True
+
+        agent = _make_agent(model_path=model_path, script_path=script_path, registry=registry)
+        result = agent.execute({"status": "pending"})
+
+        assert result["status"] == "error"
+        assert "Failed to open model" in result["error"]
+        assert "process_id" in result
+
     @patch("app.agents.ansa_agent.AnsaProcess")
     def test_process_id_in_state_but_not_in_registry(self, MockProcess):
         """If process_id references a dead process, create a new one."""
