@@ -15,3 +15,4 @@ class AnsaAgentState(TypedDict, total=False):
     error: str | None
     stdout_lines: list[str]
     stderr_lines: list[str]
+    process_id: str | None  # key into ProcessRegistry for shared ANSA processes
