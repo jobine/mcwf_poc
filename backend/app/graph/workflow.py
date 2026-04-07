@@ -45,7 +45,7 @@ def _find_agent_config(cfg: dict, name: str) -> dict:
 
 # ── Experiment lifecycle nodes ──────────────────────────────────────
 
-def init_experiment(on_event: Callable[[dict], None] | None = None):
+def init_experiment(on_event: Callable[[dict], None] | None = None) -> Callable[[AnsaAgentState], AnsaAgentState]:
     """Create the init_experiment node function with event emission."""
     def execute(state: AnsaAgentState) -> AnsaAgentState:
         """Create the experiment directory and emit workflow_init event."""
