@@ -116,6 +116,24 @@ def create_classifier_node(
     return agent_node
 
 
+def create_cleaner_node(
+    on_event: Callable[[dict], None] | None = None,
+) -> tuple[str, Callable]:
+    """Build the cleaner agent node from graph.json config.
+
+    Returns (node_name, node_function).
+    """
+    cleaner_cfg = _find_agent_config(cfg=_load_graph_config(), name="cleaner")
+
+    agent_node = AnsaAgent(
+        name=cleaner_cfg["name"],
+        script_path=settings.scripts_dir / cleaner_cfg["script_path"],
+        on_event=on_event,
+    )
+
+    return agent_node
+
+
 # ── Graph construction ──────────────────────────────────────────────
 
 def create_ansa_workflow(
@@ -133,19 +151,22 @@ def create_ansa_workflow(
 
     Graph::
 
-        START ─► init_experiment ─► classifier ─► deinit_workflow ─► END
+        START ─► init_experiment ─► classifier ─► cleaner ─► deinit_workflow ─► END
     """
     classifier_node = create_classifier_node(on_event=on_event)
+    cleaner_node = create_cleaner_node(on_event=on_event)
 
     graph = StateGraph(AnsaAgentState)
 
     graph.add_node("init_experiment", init_experiment(on_event))
     graph.add_node(classifier_node.name, classifier_node.execute, retry=RetryPolicy(max_attempts=3))
+    graph.add_node(cleaner_node.name, cleaner_node.execute, retry=RetryPolicy(max_attempts=3))
     graph.add_node("deinit_workflow", deinit_experiment(on_event))
 
     graph.add_edge(START, "init_experiment")
     graph.add_edge("init_experiment", classifier_node.name)
-    graph.add_edge(classifier_node.name, "deinit_workflow")
+    graph.add_edge(classifier_node.name, cleaner_node.name)
+    graph.add_edge(cleaner_node.name, "deinit_workflow")
     graph.add_edge("deinit_workflow", END)
 
     return graph.compile()
