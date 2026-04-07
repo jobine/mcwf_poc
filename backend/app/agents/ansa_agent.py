@@ -9,8 +9,14 @@ from __future__ import annotations
 import ast
 from collections.abc import Callable
 from pathlib import Path
-from app.core.ansa_backend import _backend_result_error
+from app.core.ansa_backend import AnsaProcess, _backend_result_error, _is_backend_result_ok
+from app.core.project import open_model
 from app.graph.state import AnsaAgentState
+
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from app.agents.process_registry import ProcessRegistry
 
 
 class AnsaAgent:
@@ -18,11 +24,11 @@ class AnsaAgent:
 
     Args:
         name: Logical name for this agent (also used as the graph node name).
-        model_path: Path to the ANSA model file.
+        model_path: Path to the ANSA model file. If set, open_model is called.
         script_path: Path to the Python script to execute.
         script_kwargs: Keyword arguments forwarded to ``project.run``.
-        on_event: Optional callback invoked for workflow events (stdout,
-            agent lifecycle, etc.). Each event is a dict with a ``type`` key.
+        registry: Shared ProcessRegistry for creating/reusing ANSA processes.
+        on_event: Optional callback invoked for workflow events.
     """
 
     def __init__(
@@ -31,12 +37,14 @@ class AnsaAgent:
         model_path: str | Path | None = None,
         script_path: str | Path | None = None,
         script_kwargs: str | None = None,
+        registry: ProcessRegistry | None = None,
         on_event: Callable[[dict], None] | None = None,
     ):
         self._name = name
-        self._model_path = Path(model_path) if model_path else None
-        self._script_path = Path(script_path) if script_path else None
+        self._model_path = model_path if isinstance(model_path, Path) else (Path(model_path) if model_path else None)
+        self._script_path = script_path if isinstance(script_path, Path) else (Path(script_path) if script_path else None)
         self._script_kwargs = ast.literal_eval(script_kwargs) if script_kwargs else {}
+        self._registry = registry
         self._on_event = on_event
 
     @property
@@ -49,7 +57,7 @@ class AnsaAgent:
             self._on_event(event)
 
     def execute(self, state: AnsaAgentState) -> AnsaAgentState:
-        """Validate inputs, then open the model and execute the script.
+        """Validate inputs, then run the script on a shared or new ANSA process.
 
         Emits ``agent_started``, ``stdout``, and ``agent_completed`` events.
         """
@@ -57,23 +65,17 @@ class AnsaAgent:
 
         # ── validate inputs ────────────────────────────────────────
         errors: list[str] = []
-        if not self._model_path.is_file():
+        if self._model_path and not self._model_path.is_file():
             errors.append(f"Model file not found: {self._model_path}")
-        if not self._script_path.is_file():
+        if self._script_path and not self._script_path.is_file():
             errors.append(f"Script file not found: {self._script_path}")
 
         if errors:
             error_msg = "; ".join(errors)
             self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
-            return {
-                "status": "error",
-                "error": error_msg,
-            }
+            return {"status": "error", "error": error_msg, "process_id": state.get("process_id")}
 
-        # ── run ANSA ───────────────────────────────────────────────
-        from app.core.ansa_backend import AnsaProcess, _is_backend_result_ok
-        from app.core.project import open_model
-
+        # ── resolve or create ANSA process ─────────────────────────
         collected_stdout: list[str] = []
         collected_stderr: list[str] = []
 
@@ -88,48 +90,65 @@ class AnsaAgent:
             self._emit({"type": "stderr", "data": line})
 
         try:
-            with AnsaProcess() as backend:
-                backend.start_output_reader(
-                    on_stdout=_on_stdout,
-                    on_stderr=_on_stderr,
-                )
+            process_id = state.get("process_id")
+            backend = None
 
+            if process_id and self._registry:
+                backend = self._registry.get(process_id)
+
+            if backend is None:
+                # Create new process and register it
+                backend = AnsaProcess()
+                backend.connect()
+                backend.start_output_reader(on_stdout=_on_stdout, on_stderr=_on_stderr)
+                if self._registry:
+                    process_id = self._registry.next_id()
+                    self._registry.register(process_id, backend)
+
+            # ── open model if configured ───────────────────────────
+            if self._model_path:
                 model_result = open_model(backend=backend, model_path=self._model_path.resolve())
                 if not _is_backend_result_ok(model_result):
-                    result = {"status": "error", "message": _backend_result_error("Failed to open model", model_result)}
+                    self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
+                    return {
+                        "status": "error",
+                        "error": _backend_result_error("Failed to open model", model_result),
+                        "process_id": process_id,
+                        "stdout_lines": collected_stdout,
+                        "stderr_lines": collected_stderr,
+                    }
 
-                script_result = backend.run_script(
-                    script=self._script_path,
-                    script_kwargs=self._script_kwargs
-                )
-                if not _is_backend_result_ok(script_result):
-                    result = {"status": "error", "message": _backend_result_error("Script execution failed", script_result)}
-
-                result = {"status": "ok", "model_result": model_result, "script_result": script_result}
-
-
-            if result.get("status") == "ok":
-                self._emit({"type": "agent_completed", "agent": self._name, "status": "success"})
-                return {
-                    "status": "success",
-                    "result": result,
-                    "stdout_lines": collected_stdout,
-                    "stderr_lines": collected_stderr,
-                }
-            else:
+            # ── run script ─────────────────────────────────────────
+            script_result = backend.run_script(
+                script=self._script_path,
+                script_kwargs=self._script_kwargs,
+            )
+            if not _is_backend_result_ok(script_result):
                 self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
                 return {
                     "status": "error",
-                    "error": result.get("message", "Unknown error from ANSA backend"),
-                    "result": result,
+                    "error": _backend_result_error("Script execution failed", script_result),
+                    "process_id": process_id,
+                    "result": {"script_result": script_result},
                     "stdout_lines": collected_stdout,
                     "stderr_lines": collected_stderr,
                 }
+
+            self._emit({"type": "agent_completed", "agent": self._name, "status": "success"})
+            return {
+                "status": "success",
+                "result": {"script_result": script_result},
+                "process_id": process_id,
+                "stdout_lines": collected_stdout,
+                "stderr_lines": collected_stderr,
+            }
+
         except Exception as exc:
             self._emit({"type": "agent_completed", "agent": self._name, "status": "error"})
             return {
                 "status": "error",
                 "error": str(exc),
+                "process_id": state.get("process_id"),
                 "stdout_lines": collected_stdout,
                 "stderr_lines": collected_stderr,
             }
