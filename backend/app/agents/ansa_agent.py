@@ -36,14 +36,32 @@ class AnsaAgent:
         name: str,
         model_path: str | Path | None = None,
         script_path: str | Path | None = None,
-        script_kwargs: str | None = None,
+        script_kwargs: str | dict | None = None,
         registry: ProcessRegistry | None = None,
         on_event: Callable[[dict], None] | None = None,
     ):
         self._name = name
-        self._model_path = model_path if isinstance(model_path, Path) else (Path(model_path) if model_path else None)
-        self._script_path = script_path if isinstance(script_path, Path) else (Path(script_path) if script_path else None)
-        self._script_kwargs = ast.literal_eval(script_kwargs) if script_kwargs else {}
+        if model_path is None:
+            self._model_path = None
+        elif isinstance(model_path, Path):
+            self._model_path = model_path
+        else:
+            self._model_path = Path(model_path)
+
+        if script_path is None:
+            self._script_path = None
+        elif isinstance(script_path, Path):
+            self._script_path = script_path
+        else:
+            self._script_path = Path(script_path)
+
+        # script_kwargs can be a dict (from JSON) or a string (to be eval'd)
+        if isinstance(script_kwargs, dict):
+            self._script_kwargs = script_kwargs
+        elif script_kwargs:
+            self._script_kwargs = ast.literal_eval(script_kwargs)
+        else:
+            self._script_kwargs = {}
         self._registry = registry
         self._on_event = on_event
 
