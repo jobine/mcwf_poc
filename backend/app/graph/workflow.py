@@ -22,6 +22,7 @@ from langgraph.graph import StateGraph, START, END
 from langgraph.types import RetryPolicy
 
 from app.agents.ansa_agent import AnsaAgent
+from app.agents.process_registry import ProcessRegistry
 from app.config import settings
 from app.graph.state import AnsaAgentState
 
@@ -44,7 +45,7 @@ def _find_agent_config(cfg: dict, name: str) -> dict:
 
 # ── Experiment lifecycle nodes ──────────────────────────────────────
 
-def init_experiment(on_event: Callable[[dict], None] | None = None):
+def init_experiment(on_event: Callable[[dict], None] | None = None) -> Callable[[AnsaAgentState], AnsaAgentState]:
     """Create the init_experiment node function with event emission."""
     def execute(state: AnsaAgentState) -> AnsaAgentState:
         """Create the experiment directory and emit workflow_init event."""
@@ -57,7 +58,10 @@ def init_experiment(on_event: Callable[[dict], None] | None = None):
     return execute
 
 
-def deinit_experiment(on_event: Callable[[dict], None] | None = None) -> Callable[[AnsaAgentState], AnsaAgentState]:
+def deinit_experiment(
+    on_event: Callable[[dict], None] | None = None,
+    registry: ProcessRegistry | None = None,
+) -> Callable[[AnsaAgentState], AnsaAgentState]:
     """Create the deinit_experiment node function with event emission."""
     def execute(state: AnsaAgentState) -> AnsaAgentState:
         """Persist the workflow result and stdout log to the experiment directory."""
@@ -87,10 +91,14 @@ def deinit_experiment(on_event: Callable[[dict], None] | None = None) -> Callabl
                 "\n".join(stderr_lines) + "\n", encoding="utf-8",
             )
 
+        # Shutdown all shared ANSA processes
+        if registry:
+            registry.shutdown_all()
+
         if on_event:
             on_event({"type": "workflow_completed", **payload})
         return {}
-    
+
     return execute
 
 
@@ -98,11 +106,9 @@ def deinit_experiment(on_event: Callable[[dict], None] | None = None) -> Callabl
 
 def create_classifier_node(
     on_event: Callable[[dict], None] | None = None,
-) -> tuple[str, Callable]:
-    """Build the classifier agent node from graph.json config.
-
-    Returns (node_name, node_function).
-    """
+    registry: ProcessRegistry | None = None,
+) -> AnsaAgent:
+    """Build the classifier agent node from graph.json config."""
     classifier_cfg = _find_agent_config(cfg=_load_graph_config(), name="classifier")
 
     agent_node = AnsaAgent(
@@ -110,6 +116,7 @@ def create_classifier_node(
         model_path=settings.data_shared_dir / classifier_cfg["model_path"],
         script_path=settings.scripts_dir / classifier_cfg["script_path"],
         script_kwargs=classifier_cfg.get("script_kwargs"),
+        registry=registry,
         on_event=on_event,
     )
 
@@ -118,16 +125,15 @@ def create_classifier_node(
 
 def create_cleaner_node(
     on_event: Callable[[dict], None] | None = None,
-) -> tuple[str, Callable]:
-    """Build the cleaner agent node from graph.json config.
-
-    Returns (node_name, node_function).
-    """
+    registry: ProcessRegistry | None = None,
+) -> AnsaAgent:
+    """Build the cleaner agent node from graph.json config."""
     cleaner_cfg = _find_agent_config(cfg=_load_graph_config(), name="cleaner")
 
     agent_node = AnsaAgent(
         name=cleaner_cfg["name"],
         script_path=settings.scripts_dir / cleaner_cfg["script_path"],
+        registry=registry,
         on_event=on_event,
     )
 
@@ -153,15 +159,16 @@ def create_ansa_workflow(
 
         START ─► init_experiment ─► classifier ─► cleaner ─► deinit_workflow ─► END
     """
-    classifier_node = create_classifier_node(on_event=on_event)
-    cleaner_node = create_cleaner_node(on_event=on_event)
+    registry = ProcessRegistry()
+    classifier_node = create_classifier_node(on_event=on_event, registry=registry)
+    cleaner_node = create_cleaner_node(on_event=on_event, registry=registry)
 
     graph = StateGraph(AnsaAgentState)
 
     graph.add_node("init_experiment", init_experiment(on_event))
     graph.add_node(classifier_node.name, classifier_node.execute, retry=RetryPolicy(max_attempts=3))
     graph.add_node(cleaner_node.name, cleaner_node.execute, retry=RetryPolicy(max_attempts=3))
-    graph.add_node("deinit_workflow", deinit_experiment(on_event))
+    graph.add_node("deinit_workflow", deinit_experiment(on_event, registry))
 
     graph.add_edge(START, "init_experiment")
     graph.add_edge("init_experiment", classifier_node.name)
