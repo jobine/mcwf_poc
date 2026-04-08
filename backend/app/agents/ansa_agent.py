@@ -7,6 +7,7 @@ LangGraph node function that validates inputs, launches ANSA, and runs a script.
 from __future__ import annotations
 
 import ast
+import re
 from collections.abc import Callable
 from pathlib import Path
 from app.core.ansa_backend import AnsaProcess, _backend_result_error, _is_backend_result_ok
@@ -17,6 +18,20 @@ from typing import TYPE_CHECKING
 
 if TYPE_CHECKING:
     from app.agents.process_registry import ProcessRegistry
+
+
+# Pattern to detect progress bar lines (e.g., "  1% [#####   ]")
+_PROGRESS_BAR_PATTERN = re.compile(r'^\s*\d{1,3}%\s*\[.*\]')
+
+
+def _is_progress_bar(line: str) -> bool:
+    """Return True if *line* looks like a progress bar output."""
+    # Handle lines that may contain \r (carriage return) for overwriting
+    for segment in line.split('\r'):
+        segment = segment.strip()
+        if segment and _PROGRESS_BAR_PATTERN.match(segment):
+            return True
+    return False
 
 
 class AnsaAgent:
@@ -101,12 +116,15 @@ class AnsaAgent:
 
         def _on_stdout(line: str) -> None:
             collected_stdout.append(line)
-            print(f"[ANSA:out] {line}", flush=True)
+            # print(f"[ANSA:out] {line}", flush=True)
             self._emit({"type": "stdout", "data": line})
 
         def _on_stderr(line: str) -> None:
+            # Skip progress bar lines to reduce noise
+            if _is_progress_bar(line):
+                return
             collected_stderr.append(line)
-            print(f"[ANSA:err] {line}", flush=True)
+            # print(f"[ANSA:err] {line}", flush=True)
             self._emit({"type": "stderr", "data": line})
 
         try:
