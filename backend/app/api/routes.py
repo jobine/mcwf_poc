@@ -6,8 +6,9 @@ Architecture:
     POST /experiments               → start workflow (legacy), returns experiment_id
     POST /experiments/stream        → start workflow with event streaming, returns experiment_id
     GET  /experiments/{id}          → poll final result
+    GET  /experiments/{id}/log      → stream real-time events
     WS   /experiments/{id}/stream   → real-time event stream (stdout, agent lifecycle, etc.)
-    GET /experiments/{id}/
+    GET  /experiments/{id}/
 """
 
 from __future__ import annotations
@@ -16,6 +17,8 @@ import asyncio
 import json
 import queue
 import uuid
+
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -175,6 +178,28 @@ async def get_experiment_status(experiment_id: str):
         return JSONResponse(entry["state"])
 
     return JSONResponse({"status": "running"}, status_code=202)
+
+
+# ── GET /experiments/{id}/log ──────────────────────────────────────────
+
+@router.get("/experiments/{experiment_id}/log")
+async def get_experiment_log(experiment_id: str):
+    """Return the recorded events for an experiment.
+
+    Reads ``events.jsonl`` from the experiment directory and returns the
+    list of event objects.  Returns 404 if the experiment directory or
+    the log file does not exist.
+    """
+    events_file: Path = settings.experiments_dir / experiment_id / "events.jsonl"
+    if not events_file.exists():
+        return JSONResponse({"error": "experiment log not found"}, status_code=404)
+
+    events = [
+        json.loads(line)
+        for line in events_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return JSONResponse(events)
 
 
 # ── WS /experiments/{id}/stream ────────────────────────────────────────
