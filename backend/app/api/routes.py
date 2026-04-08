@@ -1,11 +1,14 @@
 """Workflow routes — REST + WebSocket endpoints for workflow execution.
 
 Architecture:
-    GET  /workflow               → compiled workflow graph as JSON
-    POST /experiment             → start workflow (legacy), returns experiment_id
-    POST /experiment/stream      → start workflow with event streaming, returns experiment_id
-    GET  /experiment/{id}        → poll final result
-    WS   /experiment/{id}/stream → real-time event stream (stdout, agent lifecycle, etc.)
+    GET  /workflow                  → compiled workflow graph as JSON
+    GET  /experiments               → list all experiment IDs (newest first)
+    POST /experiments               → start workflow (legacy), returns experiment_id
+    POST /experiments/stream        → start workflow with event streaming, returns experiment_id
+    GET  /experiments/{id}          → poll final result
+    GET  /experiments/{id}/log      → stream real-time events
+    WS   /experiments/{id}/stream   → real-time event stream (stdout, agent lifecycle, etc.)
+    GET  /experiments/{id}/
 """
 
 from __future__ import annotations
@@ -14,6 +17,8 @@ import asyncio
 import json
 import queue
 import uuid
+
+from pathlib import Path
 
 from fastapi import APIRouter, WebSocket, WebSocketDisconnect
 from fastapi.responses import JSONResponse
@@ -63,10 +68,6 @@ def _run_workflow_with_events(experiment_id: str, event_q: queue.Queue) -> None:
         recorded_events.append(event)
         event_q.put(event)
 
-    # started = {"type": "workflow_started", "data": {"experiment_id": experiment_id}}
-    # recorded_events.append(started)
-    # event_q.put(started)
-
     try:
         workflow = create_ansa_workflow(on_event=_on_event)
         final_state = workflow.invoke({
@@ -78,10 +79,6 @@ def _run_workflow_with_events(experiment_id: str, event_q: queue.Queue) -> None:
         })
 
         _experiments[experiment_id]["state"] = final_state
-
-        # completed = {"type": "workflow_completed", "data": final_state}
-        # recorded_events.append(completed)
-        # event_q.put(completed)
     except Exception as exc:
         error_event = {"type": "error", "data": str(exc)}
         recorded_events.append(error_event)
@@ -98,6 +95,20 @@ def _run_workflow_with_events(experiment_id: str, event_q: queue.Queue) -> None:
         )
 
 
+# ── GET /experiments ──────────────────────────────────────────────────
+
+@router.get("/experiments")
+async def list_experiments():
+    """List all experiment IDs, sorted by creation time (newest first)."""
+    exp_dir = settings.experiments_dir
+    if not exp_dir.exists():
+        return JSONResponse([])
+
+    dirs = [d for d in exp_dir.iterdir() if d.is_dir()]
+    dirs.sort(key=lambda d: d.stat().st_birthtime, reverse=True)
+    return JSONResponse([{"experiment_id": d.name, "created_at": d.stat().st_birthtime} for d in dirs])
+
+
 # ── GET /workflow ──────────────────────────────────────────────────────
 
 @router.get("/workflow")
@@ -107,14 +118,14 @@ async def get_workflow_graph():
     return JSONResponse(workflow.get_graph().to_json())
 
 
-# ── POST /experiment ──────────────────────────────────────────────────
+# ── POST /experiments ──────────────────────────────────────────────────
 
-@router.post("/experiment")
-async def start_workflow():
+@router.post("/experiments")
+async def start_experiment():
     """Start an ANSA workflow in the background (legacy endpoint).
 
     Returns immediately with ``{"experiment_id": "..."}``.
-    Use ``GET /experiment/{id}`` to poll for results.
+    Use ``GET /experiments/{id}`` to poll for results.
     """
     experiment_id = uuid.uuid4().hex
     loop = asyncio.get_running_loop()
@@ -128,14 +139,14 @@ async def start_workflow():
     return JSONResponse({"experiment_id": experiment_id}, status_code=202)
 
 
-# ── POST /experiment/stream ──────────────────────────────────────────
+# ── POST /experiments/stream ──────────────────────────────────────────
 
-@router.post("/experiment/stream")
-async def start_workflow_stream():
+@router.post("/experiments/stream")
+async def start_experiment_stream():
     """Start an ANSA workflow with event streaming.
 
     Returns ``{"experiment_id": "..."}`` (202). Connect to
-    ``WS /experiment/{id}/stream`` for real-time events.
+    ``WS /experiments/{id}/stream`` for real-time events.
     """
     event_q: queue.Queue[dict | None] = queue.Queue()
     experiment_id = uuid.uuid4().hex
@@ -150,10 +161,10 @@ async def start_workflow_stream():
     return JSONResponse({"experiment_id": experiment_id}, status_code=202)
 
 
-# ── GET /experiment/{id} ──────────────────────────────────────────────
+# ── GET /experiments/{id} ──────────────────────────────────────────────
 
-@router.get("/experiment/{experiment_id}")
-async def get_workflow_result(experiment_id: str):
+@router.get("/experiments/{experiment_id}")
+async def get_experiment_status(experiment_id: str):
     """Poll for the final workflow result.
 
     Returns 200 with the result when done, 202 while still running,
@@ -169,10 +180,32 @@ async def get_workflow_result(experiment_id: str):
     return JSONResponse({"status": "running"}, status_code=202)
 
 
-# ── WS /experiment/{id}/stream ────────────────────────────────────────
+# ── GET /experiments/{id}/log ──────────────────────────────────────────
 
-@router.websocket("/experiment/{experiment_id}/stream")
-async def workflow_stream_ws(ws: WebSocket, experiment_id: str):
+@router.get("/experiments/{experiment_id}/log")
+async def get_experiment_log(experiment_id: str):
+    """Return the recorded events for an experiment.
+
+    Reads ``events.jsonl`` from the experiment directory and returns the
+    list of event objects.  Returns 404 if the experiment directory or
+    the log file does not exist.
+    """
+    events_file: Path = settings.experiments_dir / experiment_id / "events.jsonl"
+    if not events_file.exists():
+        return JSONResponse({"error": "experiment log not found"}, status_code=404)
+
+    events = [
+        json.loads(line)
+        for line in events_file.read_text(encoding="utf-8").splitlines()
+        if line.strip()
+    ]
+    return JSONResponse(events)
+
+
+# ── WS /experiments/{id}/stream ────────────────────────────────────────
+
+@router.websocket("/experiments/{experiment_id}/stream")
+async def experiment_stream_ws(ws: WebSocket, experiment_id: str):
     """Stream real-time workflow events over WebSocket.
 
     **Server → Client messages** (JSON with ``type`` field)::

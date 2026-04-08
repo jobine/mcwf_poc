@@ -10,7 +10,7 @@
     {
       "name": "cleaner",
       "type": "AnsaAgent",
-      "script_path": "model_cleaning/model_clean.py",
+      "script_path": "model_cleaning/model_clean.py"
     }
   ]
 }
